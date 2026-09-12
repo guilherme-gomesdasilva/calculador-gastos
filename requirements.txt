@@ -1,0 +1,5 @@
+# Dependências do Calculador de Gastos
+# Testado com Python 3.13
+
+customtkinter==6.0.0   # interface moderna (puxa darkdetect automaticamente)
+matplotlib>=3.7        # gráficos (testado com 3.10.1)

@@ -1,0 +1,24 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# ---- Ambientes virtuais ----
+.venv/
+venv/
+env/
+
+# ---- Dados pessoais do usuário (não versionar) ----
+# Os gastos reais ficam fora do repositório. Use gastos.exemplo.json como base.
+gastos.json
+
+# ---- IDEs / editores ----
+.vscode/
+.idea/
+*.swp
+
+# ---- Arquivos de sistema operacional ----
+.DS_Store
+Thumbs.db

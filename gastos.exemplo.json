@@ -1,0 +1,64 @@
+{
+  "orcamentos": {
+    "2026-08": 3000.0,
+    "2026-09": 3200.0
+  },
+  "gastos": [
+    {
+      "data": "05/08/2026",
+      "descricao": "Aluguel",
+      "categoria": "Aluguel",
+      "cartao": "Pix",
+      "valor": 1400.0
+    },
+    {
+      "data": "10/08/2026",
+      "descricao": "Compras do mês",
+      "categoria": "Alimentação",
+      "cartao": "Cartão de Crédito",
+      "valor": 620.5
+    },
+    {
+      "data": "15/08/2026",
+      "descricao": "Conta de luz",
+      "categoria": "Luz",
+      "cartao": "Débito",
+      "valor": 180.0
+    },
+    {
+      "data": "18/08/2026",
+      "descricao": "Internet",
+      "categoria": "Internet/Telefone",
+      "cartao": "Cartão de Crédito",
+      "valor": 110.0
+    },
+    {
+      "data": "05/09/2026",
+      "descricao": "Aluguel",
+      "categoria": "Aluguel",
+      "cartao": "Pix",
+      "valor": 1400.0
+    },
+    {
+      "data": "12/09/2026",
+      "descricao": "Compras do mês",
+      "categoria": "Alimentação",
+      "cartao": "Cartão de Crédito",
+      "valor": 705.9
+    },
+    {
+      "data": "14/09/2026",
+      "descricao": "Farmácia",
+      "categoria": "Saúde",
+      "cartao": "Dinheiro",
+      "valor": 89.9
+    },
+    {
+      "data": "20/09/2026",
+      "descricao": "Cinema com a família",
+      "categoria": "Lazer",
+      "cartao": "Débito",
+      "valor": 150.0
+    }
+  ]
+}
