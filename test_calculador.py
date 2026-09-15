@@ -202,7 +202,37 @@ def test_emprestimo_parcelado_nao_e_copiado_como_conta_fixa():
     assert c.quantidade_parcelas("Outra…", 420) is None
 
 
+def test_outros_por_ultimo():
+    assert c.outros_por_ultimo(["A", "Outros", "B", "C"]) == ["A", "B", "C", "Outros"]
+    assert list(c.outros_por_ultimo({"Outra": 1, "X": 2, "Y": 3})) == ["X", "Y", "Outra"]
+    assert c.outros_por_ultimo(["Outubro", "B"]) == ["Outubro", "B"]  # só a palavra exata
+    for lista in (c.CATEGORIAS, c.CARTOES, c.FONTES_RENDA, list(c.INSTITUICOES),
+                  list(c.INSTITUICOES_TRANSPORTE)):
+        assert lista[-1].startswith("Outr"), lista
+
+
+def test_acumulado_poupancas():
+    g = lambda data, cat, v: {"data": data, "categoria": cat, "valor": v}
+    gastos = [g("05/01/2026", "Reserva de Emergência", 500.0),
+              g("05/03/2026", "Reserva de Emergência", 300.0),
+              g("10/02/2026", "Investimentos", 1000.0),
+              g("10/02/2026", "Luz", 99.0)]
+    rendas = [{"data": "20/03/2026", "fonte": "Resgate da Reserva", "valor": 200.0},
+              {"data": "20/03/2026", "fonte": "Investimentos", "valor": 50.0}]  # rendimento
+    meses, saldo, mov = c.acumulado_poupancas(gastos, rendas, ate="2026-05")
+    assert meses == ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]
+    assert mov["reserva"] == [500.0, 0.0, 100.0, 0.0, 0.0]
+    assert saldo["reserva"] == [500.0, 500.0, 600.0, 600.0, 600.0]
+    assert saldo["investimentos"] == [0.0, 1000.0, 1000.0, 1000.0, 1000.0]
+    meses, saldo, _ = c.acumulado_poupancas(gastos, rendas, ate="2025-12")
+    assert meses[0] == "2026-01" and meses[-1] == "2026-03"  # "ate" antes do fim não corta
+    assert c.acumulado_poupancas([g("05/01/2026", "Luz", 1.0)], []) == (
+        [], {"reserva": [], "investimentos": []}, {"reserva": [], "investimentos": []})
+
+
 if __name__ == "__main__":
+    test_outros_por_ultimo()
+    test_acumulado_poupancas()
     test_emprestimo_parcelado_nao_e_copiado_como_conta_fixa()
     test_logo_sobre_cor()
     test_parcelamento()

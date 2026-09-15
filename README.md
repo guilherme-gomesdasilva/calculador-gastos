@@ -38,6 +38,10 @@ veja tudo em gráficos que se atualizam ao vivo.
   orçamento × renda × gasto × restante e barras por cartão.
 - 📈 **Aba de Evolução** — compara os meses (gasto × orçamento, categorias
   empilhadas) e mostra um resumo (gasto médio, maior/menor mês, total).
+- 🛟 **Aba Reserva e Investimentos** — acumulado mês a mês da reserva de
+  emergência e dos investimentos: guardar é um gasto nas categorias *Reserva de
+  Emergência* ou *Investimentos*; tirar é uma renda em *Resgate da Reserva* ou
+  *Resgate de Investimentos*. Mostra quantos meses de gastos a reserva cobre.
 - 📏 **Barra de progresso do orçamento** que muda de cor conforme o uso.
 - 📋 **Copiar contas fixas** de um mês para outro, sem duplicar.
 - 🛍️ **Parcelamento de compras e financiamentos/empréstimos** — escolha a

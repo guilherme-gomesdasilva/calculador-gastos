@@ -19,6 +19,7 @@ Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
 """
 
 import calendar
+import itertools
 import json
 import os
 import sys
@@ -62,7 +63,17 @@ else:
 DATA_FILE = os.path.join(PASTA_DADOS, "gastos.json")
 ICONE = os.path.join(BASE_DIR, "assets", "icone.png")  # vai junto no executável
 
-CATEGORIAS = [
+def outros_por_ultimo(opcoes):
+    """Deixa "Outro"/"Outros"/"Outra" no fim de uma lista (ou dict) de opções,
+    mesmo que novas opções sejam escritas depois dele; o resto mantém a ordem."""
+    def e_outro(nome):
+        return nome.split()[0].lower() in {"outro", "outros", "outra"}
+    if isinstance(opcoes, dict):
+        return dict(sorted(opcoes.items(), key=lambda item: e_outro(item[0])))
+    return sorted(opcoes, key=e_outro)
+
+
+CATEGORIAS = outros_por_ultimo([
     "Alimentação",
     "Aluguel",
     "Luz",
@@ -77,8 +88,9 @@ CATEGORIAS = [
     "Lazer",
     "Outros",
     "Financiamento/Empréstimo",
+    "Reserva de Emergência",
     "Investimentos",
-]
+])
 
 # Cor de cada categoria (usada nos gráficos) - vivas, funcionam nos dois temas
 CATEGORIA_CORES = {
@@ -96,7 +108,15 @@ CATEGORIA_CORES = {
     "Lazer": "#22C55E",
     "Outros": "#94A3B8",
     "Financiamento/Empréstimo": "#92400E",
+    "Reserva de Emergência": "#0E7490",
     "Investimentos": "#059669",
+}
+
+# Aba "Reserva e Investimentos": guardar = gasto na categoria; tirar = renda na fonte
+# poupança -> (categoria do aporte, fonte de renda do resgate)
+POUPANCAS = {
+    "reserva": ("Reserva de Emergência", "Resgate da Reserva"),
+    "investimentos": ("Investimentos", "Resgate de Investimentos"),
 }
 
 # Compras parceladas: cada parcela é um gasto no seu mês (ver distribuir_parcelas)
@@ -130,18 +150,18 @@ CONTAS_FIXAS = [
 ]
 
 # Formas de pagamento / cartões
-CARTOES = [
+CARTOES = outros_por_ultimo([
     "Dinheiro",
     "Pix",
     "Débito",
     "Cartão de Crédito",
     "Outro",
-]
+])
 CARTAO_PADRAO = "Outro"
 
 # Instituições das faturas de cartão, com a cor característica de cada uma
 CATEGORIA_FATURA = "Fatura de Cartão"
-INSTITUICOES = {
+INSTITUICOES = outros_por_ultimo({
     "Nubank": "#820AD1",
     "Itaú": "#EC7000",
     "Bradesco": "#CC092F",
@@ -152,11 +172,11 @@ INSTITUICOES = {
     "Mercado Pago": "#00B1EA",
     "PicPay": "#21C25E",
     "Outra": "#94A3B8",
-}
+})
 
 #Formas de transporte (usadas em gastos de transporte, para gráficos e filtros)
 CATEGORIA_TRANSPORTE = "Transporte"
-INSTITUICOES_TRANSPORTE = {
+INSTITUICOES_TRANSPORTE = outros_por_ultimo({
     "Ônibus": "#84CC16",
     "Metrô": "#D946EF",
     "Trem": "#C2855A",
@@ -164,7 +184,7 @@ INSTITUICOES_TRANSPORTE = {
     "Uber / 99": "#78716C",
     "Carro Moto/ Combustível": "#FB7185",
     "Outro": "#E879F9",
-}
+})
 
 # Categorias que abrem um 2º seletor no formulário:
 # categoria -> (prefixo no rótulo/gráficos, título do seletor, opções com cor)
@@ -175,7 +195,7 @@ SUBCATEGORIAS = {
 }
 
 # Formas de renda extra (entradas além do orçamento do mês)
-FONTES_RENDA = [
+FONTES_RENDA = outros_por_ultimo([
     "Freelance",
     "Vendas",
     "Investimentos",
@@ -184,7 +204,9 @@ FONTES_RENDA = [
     "13º / Férias",
     "Delivery / Apps",
     "Outros",
-]
+    "Resgate da Reserva",
+    "Resgate de Investimentos",
+])
 FONTE_PADRAO = "Outros"
 
 # Apps da fonte "Delivery / Apps", com a cor da marca (logos em assets/logos)
@@ -648,6 +670,32 @@ def legenda_com_logos(ax, handles, labels, imagem_de=logo_do_rotulo, altura=1.6,
     ax.legend(handles, labels, handler_map=mapa, **opcoes)
 
 
+def acumulado_poupancas(gastos, rendas, ate=None):
+    """Aportes (gastos) menos resgates (rendas) de cada poupança, mês a mês.
+
+    Retorna (meses, saldo, movimento): `meses` vai do 1º mês com movimento até o
+    último (ou até `ate`, se for depois), sem pular meses; `saldo[nome]` é o
+    acumulado em cada mês e `movimento[nome]` o que entrou/saiu no mês.
+    """
+    por_mes = {nome: {} for nome in POUPANCAS}
+    for nome, (categoria, fonte) in POUPANCAS.items():
+        for item, sinal in [(g, 1) for g in gastos if g["categoria"] == categoria] + \
+                           [(r, -1) for r in rendas if r.get("fonte") == fonte]:
+            mes = mes_do_gasto(item)
+            if mes:
+                por_mes[nome][mes] = por_mes[nome].get(mes, 0.0) + sinal * item["valor"]
+    com_movimento = sorted({m for d in por_mes.values() for m in d})
+    if not com_movimento:
+        return [], {n: [] for n in POUPANCAS}, {n: [] for n in POUPANCAS}
+    meses, mes = [], com_movimento[0]
+    while mes <= max(com_movimento[-1], ate or ""):
+        meses.append(mes)
+        mes = mes_de_data(somar_meses(f"01/{mes[5:]}/{mes[:4]}", 1))
+    movimento = {n: [d.get(m, 0.0) for m in meses] for n, d in por_mes.items()}
+    saldo = {n: list(itertools.accumulate(v)) for n, v in movimento.items()}
+    return meses, saldo, movimento
+
+
 def somar_meses(data_texto, meses):
     """'31/01/2026' + 1 mês -> '28/02/2026' (o dia é limitado ao fim do mês)."""
     dia, mes, ano = (int(parte) for parte in data_texto.strip().split("/"))
@@ -1044,10 +1092,12 @@ class CalculadorApp:
         self.tabview.add("Lançamentos")
         self.tabview.add("Gráficos do mês")
         self.tabview.add("Evolução")
+        self.tabview.add("Reserva e Investimentos")
 
         self._montar_aba_lancamentos(self.tabview.tab("Lançamentos"))
         self._montar_aba_graficos(self.tabview.tab("Gráficos do mês"))
         self._montar_aba_evolucao(self.tabview.tab("Evolução"))
+        self._montar_aba_poupancas(self.tabview.tab("Reserva e Investimentos"))
 
     def _montar_header(self):
         header = ctk.CTkFrame(self.root, fg_color=ACCENT, corner_radius=0, height=76)
@@ -1618,19 +1668,40 @@ class CalculadorApp:
         self.fig_comp = self.canvas_comp.figure
         self.ax_comp = self.fig_comp.add_subplot(111)
 
-    def _montar_resumo_evolucao(self, parent):
-        wrap = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
-        wrap.grid(row=0, column=0, sticky="nsew", padx=6, pady=(6, 6))
-        for i in range(4):
-            wrap.columnconfigure(i, weight=1, uniform="resumo")
+    def _montar_aba_poupancas(self, parent):
+        parent.configure(fg_color="transparent")
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=3, uniform="graficos_poupanca")  # acumulado maior
+        parent.rowconfigure(2, weight=2, uniform="graficos_poupanca")
 
-        self.resumo_tiles = []
-        tiles = [
+        self.poupanca_tiles = self._montar_tiles(parent, [
+            ("🛟", "RESERVA DE EMERGÊNCIA", CATEGORIA_CORES["Reserva de Emergência"]),
+            ("📈", "INVESTIMENTOS", CATEGORIA_CORES["Investimentos"]),
+            ("🏦", "TOTAL GUARDADO", ACCENT),
+            ("💵", "GUARDADO NO MÊS", COR_GASTO),
+        ])
+        self.canvas_acum = self._criar_canvas_grafico(parent, 1, 0)
+        self.fig_acum = self.canvas_acum.figure
+        self.ax_acum = self.fig_acum.add_subplot(111)
+        self.canvas_aportes = self._criar_canvas_grafico(parent, 2, 0)
+        self.fig_aportes = self.canvas_aportes.figure
+        self.ax_aportes = self.fig_aportes.add_subplot(111)
+
+    def _montar_resumo_evolucao(self, parent):
+        self.resumo_tiles = self._montar_tiles(parent, [
             ("📊", "GASTO MÉDIO/MÊS", ACCENT),
             ("🔺", "MAIOR MÊS", COR_NEG),
             ("🔻", "MENOR MÊS", COR_POS),
             ("💰", "TOTAL ACUMULADO", COR_GASTO),
-        ]
+        ])
+
+    def _montar_tiles(self, parent, tiles):
+        """Faixa de resumo (ícone, título, valor e subtítulo) no topo de uma aba."""
+        wrap = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
+        wrap.grid(row=0, column=0, sticky="nsew", padx=6, pady=(6, 6))
+        for i in range(len(tiles)):
+            wrap.columnconfigure(i, weight=1, uniform="resumo")
+        celulas = []
         for col, (icone, titulo, cor) in enumerate(tiles):
             cel = ctk.CTkFrame(wrap, fg_color="transparent")
             cel.grid(row=0, column=col, sticky="nsew", padx=14, pady=14)
@@ -1645,7 +1716,8 @@ class CalculadorApp:
             sub = ctk.CTkLabel(cel, text="", text_color=SUB,
                                font=self.ft_pequena)
             sub.pack(anchor="w")
-            self.resumo_tiles.append((valor, sub))
+            celulas.append((valor, sub))
+        return celulas
 
     # --------------------------------------------------------------- ações ---
     def _parse_valor(self, texto):
@@ -2124,6 +2196,98 @@ class CalculadorApp:
         self._atualizar_progresso()
         self._atualizar_graficos()
         self._atualizar_evolucao()
+        self._atualizar_poupancas()
+
+    def _atualizar_poupancas(self):
+        meses, saldo, movimento = acumulado_poupancas(self.gastos, self.rendas,
+                                                      ate=self.mes_atual)
+        texto, sub, grid = _cor(TEXTO), _cor(SUB), _cor(GRID)
+        nomes = {"reserva": "Reserva de Emergência", "investimentos": "Investimentos"}
+
+        # ---- resumo no mês exibido ----
+        i = next((k for k, m in enumerate(meses) if m == self.mes_atual), None)
+        antes = [k for k, m in enumerate(meses) if m < self.mes_atual]
+        indice = i if i is not None else (antes[-1] if antes else None)
+        def no_mes(serie):
+            return serie[indice] if indice is not None else 0.0
+        reserva, invest = no_mes(saldo["reserva"]), no_mes(saldo["investimentos"])
+        mov_mes = {n: movimento[n][i] if i is not None else 0.0 for n in POUPANCAS}
+        guardado = sum(mov_mes.values())
+        # quantos meses de gastos a reserva cobre (sem contar o que foi guardado)
+        categorias_poupanca = {cat for cat, _ in POUPANCAS.values()}
+        gasto_por_mes = {}
+        for g in self.gastos:
+            m = mes_do_gasto(g)
+            if m and g["categoria"] not in categorias_poupanca:
+                gasto_por_mes[m] = gasto_por_mes.get(m, 0.0) + g["valor"]
+        media = sum(gasto_por_mes.values()) / len(gasto_por_mes) if gasto_por_mes else 0
+        cobertura = (f"cobre {reserva / media:.1f} meses de gastos".replace(".", ",")
+                     if media and reserva > 0 else "guarde para cobrir imprevistos")
+        dados = [
+            (formatar_moeda(reserva), cobertura),
+            (formatar_moeda(invest), f"no mês: {formatar_moeda(mov_mes['investimentos'])}"),
+            (formatar_moeda(reserva + invest), f"até {nome_mes(self.mes_atual)}"),
+            (formatar_moeda(guardado), "aportes menos resgates"),
+        ]
+        for (valor, legenda), (texto_valor, texto_legenda) in zip(self.poupanca_tiles, dados):
+            valor.configure(text=texto_valor)
+            legenda.configure(text=texto_legenda)
+
+        def estilizar(fig, ax, titulo):
+            self._preparar_ax(fig, ax)
+            ax.clear()
+            ax.set_title(titulo, fontsize=12, fontweight="bold", color=texto, pad=10)
+            for lado in ("top", "right", "left"):
+                ax.spines[lado].set_visible(False)
+            ax.spines["bottom"].set_color(_cor(BORDA))
+            ax.tick_params(left=False, labelleft=False, bottom=False)
+            ax.tick_params(axis="x", labelsize=9, colors=texto)
+            ax.yaxis.grid(True, color=grid, zorder=0)
+            if not meses:
+                ax.text(0.5, 0.5, "Lance gastos nas categorias Reserva de Emergência ou "
+                        "Investimentos para acompanhar aqui", ha="center", va="center",
+                        color=sub, fontsize=10, transform=ax.transAxes)
+                ax.axis("off")
+                return False
+            x = list(range(len(meses)))
+            passo = max(1, len(meses) // 12)  # muitos meses: não amontoa os rótulos
+            ax.set_xticks(x[::passo])
+            ax.set_xticklabels([label_mes_curto(m) for m in meses][::passo])
+            return True
+
+        # ---- gráfico 1: acumulado ----
+        if estilizar(self.fig_acum, self.ax_acum, "Acumulado mês a mês"):
+            x = list(range(len(meses)))
+            for nome, serie in saldo.items():
+                cor = CATEGORIA_CORES[nomes[nome]]
+                # o valor atual vai na legenda: rótulos no fim das linhas se sobrepõem
+                self.ax_acum.plot(x, serie, color=cor, linewidth=2.4, marker="o",
+                                  markersize=4, zorder=4,
+                                  label=f"{nomes[nome]}\n{formatar_moeda(serie[-1])}")
+                self.ax_acum.fill_between(x, serie, color=cor, alpha=0.15, zorder=3)
+            valores = saldo["reserva"] + saldo["investimentos"]
+            self.ax_acum.set_ylim(min(min(valores), 0) * 1.15, max(max(valores), 1) * 1.15)
+            self.ax_acum.axhline(0, color=_cor(BORDA), linewidth=1, zorder=2)
+            self.ax_acum.legend(loc="center left", bbox_to_anchor=(1.01, 0.5),
+                                frameon=False, fontsize=9, labelspacing=1.2,
+                                labelcolor=texto)
+        self.canvas_acum.draw()
+
+        # ---- gráfico 2: aportes e resgates ----
+        if estilizar(self.fig_aportes, self.ax_aportes, "Aportes e resgates por mês"):
+            x = list(range(len(meses)))
+            largura = 0.38
+            for k, (nome, serie) in enumerate(movimento.items()):
+                deslocamento = (k - 0.5) * largura
+                self.ax_aportes.bar([xi + deslocamento for xi in x], serie, width=largura,
+                                    color=CATEGORIA_CORES[nomes[nome]], zorder=3,
+                                    label=nomes[nome])
+            valores = movimento["reserva"] + movimento["investimentos"]
+            self.ax_aportes.set_ylim(min(min(valores), 0) * 1.2, max(max(valores), 1) * 1.2)
+            self.ax_aportes.axhline(0, color=_cor(BORDA), linewidth=1, zorder=2)
+            self.ax_aportes.legend(loc="center left", bbox_to_anchor=(1.01, 0.5),
+                                   frameon=False, fontsize=9, labelcolor=texto)
+        self.canvas_aportes.draw()
 
     def _atualizar_lista(self):
         for item in self.tree.get_children():
