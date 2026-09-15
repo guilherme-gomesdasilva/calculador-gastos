@@ -89,6 +89,26 @@ python calculador.py
 
 ---
 
+## 💻 Aplicativo para Windows
+
+Não precisa instalar Python: o GitHub gera o aplicativo automaticamente
+(workflow `.github/workflows/windows.yml`) a cada push na `main`.
+
+1. No GitHub, abra **Actions → App Windows** e clique na execução mais recente.
+2. Em **Artifacts**, baixe **CalculadorDeGastos-windows** e extraia o `.zip`.
+3. Abra `CalculadorDeGastos\CalculadorDeGastos.exe`.
+
+Para publicar uma versão com download direto na página **Releases**, crie uma
+tag: `git tag v1.0 && git push origin v1.0`.
+
+No aplicativo, os dados ficam em `%APPDATA%\CalculadorGastos\gastos.json` e os
+logos em `%APPDATA%\CalculadorGastos\logos\` (cole essa pasta na barra de
+endereço do Explorador de Arquivos para abrir). Na primeira vez, o Windows
+SmartScreen pode avisar que o app não é reconhecido: clique em
+**Mais informações → Executar assim mesmo**.
+
+---
+
 ## 🗂️ Estrutura do projeto
 
 ```

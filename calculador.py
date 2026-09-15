@@ -21,6 +21,7 @@ Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
 import calendar
 import json
 import os
+import sys
 import tkinter as tk
 import unicodedata
 import uuid
@@ -44,11 +45,19 @@ from matplotlib.patches import Rectangle
 from matplotlib.transforms import Bbox, TransformedBbox
 from PIL import Image, ImageDraw, ImageFont
 
-# Arquivo de dados fica na mesma pasta do script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "gastos.json")
-# Logos dos bancos (PNG, fora do Git): assets/logos/nubank.png, itau.png...
-LOGOS_DIR = os.path.join(BASE_DIR, "assets", "logos")
+if getattr(sys, "frozen", False):
+    # executável (PyInstaller): a pasta do programa pode ser temporária ou sem
+    # permissão de escrita, então dados e logos ficam na pasta do usuário
+    PASTA_DADOS = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
+                               "CalculadorGastos")
+    LOGOS_DIR = os.path.join(PASTA_DADOS, "logos")  # nubank.png, itau.png...
+    os.makedirs(LOGOS_DIR, exist_ok=True)
+else:
+    # rodando pelo código: tudo na pasta do projeto
+    PASTA_DADOS = BASE_DIR
+    LOGOS_DIR = os.path.join(BASE_DIR, "assets", "logos")
+DATA_FILE = os.path.join(PASTA_DADOS, "gastos.json")
 
 CATEGORIAS = [
     "Alimentação",
@@ -715,7 +724,8 @@ class CalculadorApp:
         # Com o ibus (padrão do Ubuntu), o Tk registra cada widget no método de
         # entrada e fica ~250x mais lento para criar telas e janelas. Os campos
         # do app só recebem números e datas, então dispensa o método de entrada.
-        self.root.tk.call("tk", "useinputmethods", "0")
+        if sys.platform.startswith("linux"):
+            self.root.tk.call("tk", "useinputmethods", "0")
         self.root.title("Calculador de Gastos")
         self.root.geometry("1080x980")
         self.root.minsize(940, 800)

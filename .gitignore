@@ -26,3 +26,8 @@ assets/logos/*
 # ---- Arquivos de sistema operacional ----
 .DS_Store
 Thumbs.db
+
+# ---- Executável (PyInstaller) ----
+build/
+dist/
+*.spec

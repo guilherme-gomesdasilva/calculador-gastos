@@ -1,0 +1,54 @@
+# Gera o aplicativo para Windows (pasta com CalculadorDeGastos.exe, compactada em .zip).
+# - push na main ou "Run workflow": o .zip fica em Actions > (execução) > Artifacts
+# - tag v* (ex.: git tag v1.0 && git push origin v1.0): o .zip vai também para a Release
+name: App Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # necessário só para publicar a Release nas tags
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Testes
+        run: python test_calculador.py
+
+      - name: Gerar executável
+        # --onedir (padrão) abre mais rápido e dá menos alarme falso de antivírus
+        # que --onefile; --collect-data leva os temas/fontes do CustomTkinter
+        run: >
+          pyinstaller --noconfirm --windowed --name CalculadorDeGastos
+          --collect-data customtkinter calculador.py
+
+      - name: Compactar
+        shell: pwsh
+        run: Compress-Archive -Path dist/CalculadorDeGastos -DestinationPath CalculadorDeGastos-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CalculadorDeGastos-windows
+          path: CalculadorDeGastos-windows.zip
+
+      - name: Publicar na Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CalculadorDeGastos-windows.zip
