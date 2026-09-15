@@ -44,12 +44,30 @@ jobs:
 
       - name: Gerar executável
         # --onedir (padrão) abre mais rápido e dá menos alarme falso de antivírus
-        # que --onefile; --collect-data leva os temas/fontes do CustomTkinter
+        # que --onefile; --collect-data leva os temas/fontes do CustomTkinter;
+        # PIL._tkinter_finder é carregado só ao desenhar logos (o PyInstaller não
+        # o detecta sozinho e o app fechava ao abrir com rendas de delivery)
         run: >
           pyinstaller --noconfirm --windowed --name CalculadorDeGastos
           --collect-data customtkinter
+          --hidden-import PIL._tkinter_finder
           --add-data "assets/icone.png${{ matrix.separador }}assets"
           calculador.py
+
+      - name: Abrir o executável (Ubuntu)
+        # abre o app empacotado por 20 s com uma renda de delivery e um logo, para
+        # pegar módulo faltando no pacote; "timeout" encerrar (124) = não fechou
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y xvfb
+          mkdir -p teste/CalculadorGastos/logos
+          cp assets/icone.png teste/CalculadorGastos/logos/ifood.png
+          python -c "import json; d = json.load(open('gastos.exemplo.json', encoding='utf-8')); d['rendas'].append({'data': '10/09/2026', 'descricao': 'Delivery - iFood', 'fonte': 'Delivery / Apps', 'app': 'iFood', 'valor': 300.0}); json.dump(d, open('teste/CalculadorGastos/gastos.json', 'w', encoding='utf-8'))"
+          set +e
+          XDG_DATA_HOME="$PWD/teste" timeout 20 xvfb-run -a dist/CalculadorDeGastos/CalculadorDeGastos
+          codigo=$?
+          set -e
+          if [ "$codigo" -ne 124 ]; then echo "O app fechou sozinho (código $codigo)"; exit 1; fi
 
       - name: Compactar (Windows)
         if: runner.os == 'Windows'
