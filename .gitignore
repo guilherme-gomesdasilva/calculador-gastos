@@ -14,6 +14,10 @@ env/
 # Os gastos reais ficam fora do repositório. Use gastos.exemplo.json como base.
 gastos.json
 
+# ---- Logos dos bancos (marcas registradas, cada um coloca os seus) ----
+assets/logos/*
+!assets/logos/.gitkeep
+
 # ---- IDEs / editores ----
 .vscode/
 .idea/

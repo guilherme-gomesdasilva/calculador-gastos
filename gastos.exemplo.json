@@ -54,11 +54,33 @@
       "valor": 89.9
     },
     {
+      "data": "10/09/2026",
+      "descricao": "Fatura do cartão",
+      "categoria": "Fatura de Cartão",
+      "cartao": "Pix",
+      "instituicao": "Nubank",
+      "valor": 540.0
+    },
+    {
       "data": "20/09/2026",
       "descricao": "Cinema com a família",
       "categoria": "Lazer",
       "cartao": "Débito",
       "valor": 150.0
+    }
+  ],
+  "rendas": [
+    {
+      "data": "22/08/2026",
+      "descricao": "Venda da bicicleta",
+      "fonte": "Vendas",
+      "valor": 400.0
+    },
+    {
+      "data": "08/09/2026",
+      "descricao": "Site do cliente",
+      "fonte": "Freelance",
+      "valor": 850.0
     }
   ]
 }

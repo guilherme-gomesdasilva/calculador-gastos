@@ -22,18 +22,33 @@ import calendar
 import json
 import os
 import tkinter as tk
+import unicodedata
+import uuid
 from datetime import date
+from functools import lru_cache
 from tkinter import font as tkfont
 from tkinter import ttk
 
 import customtkinter as ctk
 import matplotlib as mpl
+import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.colors import to_rgb
+from matplotlib.container import BarContainer
+from matplotlib.image import BboxImage
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from matplotlib.legend_handler import (HandlerBase, HandlerPatch,
+                                       update_from_first_child)
+from matplotlib.patches import Rectangle
+from matplotlib.transforms import Bbox, TransformedBbox
+from PIL import Image, ImageDraw, ImageFont
 
 # Arquivo de dados fica na mesma pasta do script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, "gastos.json")
+# Logos dos bancos (PNG, fora do Git): assets/logos/nubank.png, itau.png...
+LOGOS_DIR = os.path.join(BASE_DIR, "assets", "logos")
 
 CATEGORIAS = [
     "Alimentação",
@@ -43,11 +58,14 @@ CATEGORIAS = [
     "Gás",
     "Internet/Telefone",
     "Fatura de Cartão",
+    "Parcelamento de Compras",
     "Transporte",
     "Saúde",
     "Educação",
     "Lazer",
     "Outros",
+    "Financiamento/Empréstimo",
+    "Investimentos",
 ]
 
 # Cor de cada categoria (usada nos gráficos) - vivas, funcionam nos dois temas
@@ -59,12 +77,34 @@ CATEGORIA_CORES = {
     "Gás": "#EF4444",
     "Internet/Telefone": "#0EA5E9",
     "Fatura de Cartão": "#4338CA",
+    "Parcelamento de Compras": "#F9A8D4",
     "Transporte": "#14B8A6",
     "Saúde": "#EC4899",
     "Educação": "#F97316",
     "Lazer": "#22C55E",
     "Outros": "#94A3B8",
+    "Financiamento/Empréstimo": "#92400E",
+    "Investimentos": "#059669",
 }
+
+# Compras parceladas: cada parcela é um gasto no seu mês (ver distribuir_parcelas)
+CATEGORIA_PARCELAMENTO = "Parcelamento de Compras"
+OUTRA_QUANTIDADE = "Outra…"
+TEXTO_SOBRE = {"#F9A8D4": "#1F2430"}  # cor clara (rosa do parcelamento): texto escuro
+# categoria parcelada -> (quantidades rápidas no menu, máximo aceito em "Outra…")
+CATEGORIAS_PARCELADAS = {
+    CATEGORIA_PARCELAMENTO: ([f"{n}x" for n in (2, 3, 4, 5, 6, 10, 12)], 48),
+    "Financiamento/Empréstimo": ([f"{n}x" for n in (12, 24, 36, 48)], 420),
+}
+
+
+def quantidade_parcelas(texto, maximo):
+    """'12x' ou '12' -> 12, se estiver entre 2 e `maximo`; senão None."""
+    texto = (texto or "").strip().lower().removesuffix("x").strip()
+    if not texto.isdigit():
+        return None
+    n = int(texto)
+    return n if 2 <= n <= maximo else None
 
 # Categorias consideradas "contas fixas" (recorrentes todo mês)
 CONTAS_FIXAS = [
@@ -73,7 +113,8 @@ CONTAS_FIXAS = [
     "Água",
     "Gás",
     "Internet/Telefone",
-    "Fatura de Cartão",
+    "Educação",
+    "Financiamento/Empréstimo",
 ]
 
 # Formas de pagamento / cartões
@@ -85,6 +126,92 @@ CARTOES = [
     "Outro",
 ]
 CARTAO_PADRAO = "Outro"
+
+# Instituições das faturas de cartão, com a cor característica de cada uma
+CATEGORIA_FATURA = "Fatura de Cartão"
+INSTITUICOES = {
+    "Nubank": "#820AD1",
+    "Itaú": "#EC7000",
+    "Bradesco": "#CC092F",
+    "Santander": "#EC0000",
+    "Banco do Brasil": "#F9DD16",
+    "Caixa": "#005CA9",
+    "Inter": "#FF7A00",
+    "Mercado Pago": "#00B1EA",
+    "PicPay": "#21C25E",
+    "Outra": "#94A3B8",
+}
+
+#Formas de transporte (usadas em gastos de transporte, para gráficos e filtros)
+CATEGORIA_TRANSPORTE = "Transporte"
+INSTITUICOES_TRANSPORTE = {
+    "Ônibus": "#84CC16",
+    "Metrô": "#D946EF",
+    "Trem": "#C2855A",
+    "Táxi": "#818CF8",
+    "Uber / 99": "#78716C",
+    "Carro Moto/ Combustível": "#FB7185",
+    "Outro": "#E879F9",
+}
+
+# Categorias que abrem um 2º seletor no formulário:
+# categoria -> (prefixo no rótulo/gráficos, título do seletor, opções com cor)
+SUBCATEGORIAS = {
+    CATEGORIA_FATURA: ("Fatura ", "INSTITUIÇÃO", INSTITUICOES),
+    CATEGORIA_TRANSPORTE: ("Transporte - ", "TIPO DE TRANSPORTE",
+                           INSTITUICOES_TRANSPORTE),
+}
+
+# Formas de renda extra (entradas além do orçamento do mês)
+FONTES_RENDA = [
+    "Freelance",
+    "Vendas",
+    "Investimentos",
+    "Reembolso",
+    "Presente",
+    "13º / Férias",
+    "Delivery / Apps",
+    "Outros",
+]
+FONTE_PADRAO = "Outros"
+
+# Apps da fonte "Delivery / Apps", com a cor da marca (logos em assets/logos)
+FONTE_DELIVERY = "Delivery / Apps"
+APPS_DELIVERY = {
+    "iFood": "#EA1D2C",
+    "99": "#FFD200",
+    "Uber": "#000000",
+    "Mercado Livre": "#FFE600",
+    "Shopee": "#EE4D2D",
+    "Keeta": "#FFD100",
+    "Rappi": "#FF441F",
+    "Lalamove": "#F16622",
+    "Loggi": "#00B4FC",
+    "Amazon Flex": "#FF9900",
+    "Borzo": "#94A3B8",
+    "inDrive": "#9CE424",
+    "Zé Delivery": "#FFE000",
+    "aiqfome": "#7B1FA2",
+    "Magalu": "#0C84FC",
+}
+COLUNAS_ENTRADAS = 6  # cards por linha no topo (salário, rendas e apps com valor)
+
+# Emoji de cada forma de pagamento (gráfico de formas de pagamento)
+CARTAO_EMOJI = {
+    "Dinheiro": "💵",
+    "Pix": "💠",
+    "Débito": "🏧",
+    "Cartão de Crédito": "💳",
+    "Outro": "🧾",
+}
+# O matplotlib não desenha emoji colorido: ele vira imagem com a 1ª fonte que existir
+FONTES_EMOJI = [
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+    "C:/Windows/Fonts/seguiemj.ttf",
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+]
 
 # Cor de cada forma de pagamento (usada no gráfico)
 CARTAO_CORES = {
@@ -101,6 +228,8 @@ ACCENT = "#3B82F6"        # cor de destaque (azul)
 ACCENT_HOVER = "#2563EB"
 COR_GASTO = "#F59E0B"     # âmbar
 COR_POS = "#22C55E"       # verde
+COR_RENDA = "#10B981"     # verde-esmeralda (renda extra)
+COR_RENDA_HOVER = "#0E9F6E"
 COR_NEG = "#EF4444"       # vermelho
 COR_ORC = ACCENT
 
@@ -112,6 +241,7 @@ SUB = ("#75809A", "#9AA3B2")      # texto secundário / rótulos
 BORDA = ("#E2E6F0", "#333844")    # bordas
 GRID = ("#EEF0F6", "#333844")     # gridlines dos gráficos
 ZEBRA = ("#F7F8FC", "#262B34")    # linha alternada da tabela
+COR_RESTANTE = "#166534"  # verde mais escuro que os demais verdes dos gráficos
 
 
 def _cor(tupla):
@@ -182,29 +312,30 @@ def mes_atual_chave():
 
 
 def carregar_dados():
-    """Lê os orçamentos (por mês) e os gastos do arquivo JSON.
+    """Lê os orçamentos (por mês), os gastos e as rendas extras do JSON.
 
     Aceita vários formatos, garantindo compatibilidade:
-    - novo: {"orcamentos": {"AAAA-MM": valor, ...}, "gastos": [...]}
+    - novo: {"orcamentos": {...}, "gastos": [...], "rendas": [...]}
     - anterior: {"orcamento": valor_único, "gastos": [...]}
     - antigo: apenas uma lista de gastos.
-    Retorna (orcamentos: dict, gastos: list).
+    Retorna (orcamentos: dict, gastos: list, rendas: list).
     """
     if not os.path.exists(DATA_FILE):
-        return {}, []
+        return {}, [], []
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             dados = json.load(f)
     except (json.JSONDecodeError, OSError):
-        return {}, []
+        return {}, [], []
 
     if isinstance(dados, list):  # formato antigo (lista pura)
-        return {}, dados
+        return {}, dados, []
 
     gastos = dados.get("gastos", [])
+    rendas = dados.get("rendas", [])
     if "orcamentos" in dados:  # formato novo (por mês)
         orcamentos = {k: float(v) for k, v in dados["orcamentos"].items()}
-        return orcamentos, gastos
+        return orcamentos, gastos, rendas
 
     # formato anterior (orçamento único) -> aplica o valor a cada mês existente
     orcamentos = {}
@@ -213,32 +344,348 @@ def carregar_dados():
         for gasto in gastos:
             chave = mes_do_gasto(gasto) or mes_atual_chave()
             orcamentos[chave] = valor
-    return orcamentos, gastos
+    return orcamentos, gastos, rendas
 
 
-def salvar_dados(orcamentos, gastos):
-    """Grava os orçamentos por mês e a lista de gastos no arquivo JSON."""
+def salvar_dados(orcamentos, gastos, rendas):
+    """Grava orçamentos por mês, gastos e rendas extras no arquivo JSON."""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(
-            {"orcamentos": orcamentos, "gastos": gastos},
+            {"orcamentos": orcamentos, "gastos": gastos, "rendas": rendas},
             f,
             ensure_ascii=False,
             indent=2,
         )
 
 
+MAX_CENTAVOS = 99_999_999_999  # R$ 999.999.999,99: limite dos campos de dinheiro
+
+
+def formatar_numero(valor):
+    """Número no formato brasileiro, sem o 'R$': 1234.5 -> '1.234,50'."""
+    texto = f"{valor:,.2f}"
+    return texto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def centavos_do_texto(texto):
+    """Só os dígitos 0-9 viram centavos: '1.234,56' -> 123456, 'abc' -> 0."""
+    digitos = "".join(ch for ch in texto if ch in "0123456789")
+    return min(int(digitos or 0), MAX_CENTAVOS)
+
+
 def formatar_moeda(valor):
     """Formata um número como moeda brasileira: 1234.5 -> 'R$ 1.234,50'."""
-    texto = f"{valor:,.2f}"
-    texto = texto.replace(",", "X").replace(".", ",").replace("X", ".")
+    texto = formatar_numero(valor)
     return f"R$ {texto}"
+
+
+def rotulo_categoria(gasto):
+    """Categoria para exibição: 'Fatura Nubank', 'Transporte - Ônibus'..."""
+    sub = SUBCATEGORIAS.get(gasto["categoria"])
+    inst = gasto.get("instituicao")
+    if sub and inst:
+        return sub[0] + inst
+    return gasto["categoria"]
+
+
+def instituicao_do_rotulo(rotulo):
+    """'Fatura Nubank' -> 'Nubank'; qualquer outro rótulo -> None."""
+    inst = rotulo.removeprefix("Fatura ")
+    return inst if inst != rotulo and inst in INSTITUICOES else None
+
+
+def cor_categoria(rotulo):
+    """Cor de um rótulo: subcategorias (banco, transporte) usam a própria cor."""
+    for prefixo, _titulo, opcoes in SUBCATEGORIAS.values():
+        nome = rotulo.removeprefix(prefixo)
+        if nome != rotulo and nome in opcoes:
+            return opcoes[nome]
+    return CATEGORIA_CORES.get(rotulo, "#94A3B8")
+
+
+def arquivo_logo(instituicao, extensao=".png"):
+    """'Banco do Brasil' -> '<LOGOS_DIR>/banco-do-brasil.png'."""
+    nome = unicodedata.normalize("NFKD", instituicao).encode("ascii", "ignore")
+    return os.path.join(LOGOS_DIR, nome.decode().lower().replace(" ", "-") + extensao)
+
+
+@lru_cache(maxsize=None)
+def imagem_logo(nome):
+    """Logo (banco, app) como imagem PIL RGBA, ou None se não houver arquivo válido."""
+    for extensao in (".png", ".jpg", ".jpeg", ".webp"):
+        try:
+            with Image.open(arquivo_logo(nome, extensao)) as img:
+                return img.convert("RGBA")
+        except (OSError, ValueError, SyntaxError):  # PIL usa SyntaxError p/ inválido
+            continue
+    return None
+
+
+def carregar_logo(instituicao):
+    """Logo como array para o matplotlib, ou None."""
+    img = imagem_logo(instituicao)
+    return None if img is None else np.asarray(img)
+
+
+def logo_ctk(nome, altura):
+    """Logo para a interface, sem fundo: uma versão legível para cada tema, ou None."""
+    img = imagem_logo(nome)
+    if img is None:
+        return None
+    arr = np.asarray(img)
+    claro, escuro = (Image.fromarray(logo_sobre_cor(arr, cor)) for cor in CARD)
+    return ctk.CTkImage(light_image=claro, dark_image=escuro,
+                        size=(round(img.width * altura / img.height), altura))
+
+
+def rotulo_renda(renda):
+    """Como a renda aparece na tabela: 'Freelance', 'Delivery - iFood'..."""
+    if renda.get("app"):
+        return f"Delivery - {renda['app']}"
+    return renda.get("fonte", FONTE_PADRAO)
+
+
+def mesma_renda(renda, mes, fonte, app=None):
+    """A renda é do mês e da fonte (e do app, no delivery) indicados?"""
+    return (mes_do_gasto(renda) == mes and renda.get("app") == app
+            and renda.get("fonte", FONTE_PADRAO) == fonte)
+
+
+def totais_renda(rendas):
+    """({app: total} de cada app de delivery, total das demais rendas extras)."""
+    por_app = dict.fromkeys(APPS_DELIVERY, 0.0)
+    outras = 0.0
+    for renda in rendas:
+        if renda.get("fonte") == FONTE_DELIVERY and renda.get("app") in por_app:
+            por_app[renda["app"]] += renda["valor"]
+        else:
+            outras += renda["valor"]
+    return por_app, outras
+
+
+class _HandlerLogo(HandlerBase):
+    """Desenha o logo (mantendo a proporção) no lugar do quadradinho da legenda."""
+
+    def __init__(self, logo):
+        super().__init__()
+        self.logo = logo
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent,
+                       width, height, fontsize, trans):
+        alt, larg = self.logo.shape[:2]
+        escala = min(width / larg, height / alt)
+        w, h = larg * escala, alt * escala
+        x, y = -xdescent + (width - w) / 2, -ydescent + (height - h) / 2
+        imagem = BboxImage(TransformedBbox(Bbox.from_bounds(x, y, w, h), trans))
+        imagem.set_data(self.logo)
+        return [imagem]
+
+
+def _quadrado_legenda(legend, orig_handle, xdescent, ydescent, width, height,
+                      fontsize):
+    """Quadradinho de cor do tamanho da fonte, centrado no espaço (largo) do logo."""
+    return Rectangle((-xdescent + (width - fontsize) / 2,
+                      -ydescent + (height - fontsize) / 2), fontsize, fontsize)
+
+
+@lru_cache(maxsize=None)
+def imagem_emoji(emoji):
+    """Emoji colorido como array RGBA, ou None se não houver fonte de emoji."""
+    for caminho in FONTES_EMOJI:
+        for tamanho in (109, 160):  # fontes de emoji em bitmap só aceitam certos tamanhos
+            try:
+                fonte = ImageFont.truetype(caminho, tamanho)
+                img = Image.new("RGBA", (tamanho * 2, tamanho * 2), (0, 0, 0, 0))
+                ImageDraw.Draw(img).text((0, 0), emoji, font=fonte, embedded_color=True)
+            except OSError:
+                continue
+            caixa = img.getbbox()
+            if caixa:
+                return np.asarray(img.crop(caixa))
+    return None
+
+
+def logo_do_rotulo(rotulo):
+    """Logo do banco de um rótulo 'Fatura <banco>', ou None."""
+    inst = instituicao_do_rotulo(rotulo)
+    return carregar_logo(inst) if inst else None
+
+
+def _lab(rgb):
+    """Cores RGB (N×3, 0-1) no espaço Lab, onde distância ≈ diferença percebida."""
+    rgb = np.where(rgb > 0.04045, ((rgb + 0.055) / 1.055) ** 2.4, rgb / 12.92)
+    xyz = rgb @ np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722],
+                          [0.0193, 0.1192, 0.9505]]).T / [0.95047, 1.0, 1.08883]
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
+    return np.stack([116 * f[:, 1] - 16, 500 * (f[:, 0] - f[:, 1]),
+                     200 * (f[:, 1] - f[:, 2])], axis=1)
+
+
+def _luminancia(rgb):
+    """Luminância relativa (WCAG) de cores RGB N×3 em 0-1."""
+    lin = np.where(rgb > 0.04045, ((rgb + 0.055) / 1.055) ** 2.4, rgb / 12.92)
+    return lin @ [0.2126, 0.7152, 0.0722]
+
+
+def logo_sobre_cor(logo, cor):
+    """Logo legível sobre `cor` (sem mexer nele se já estiver legível).
+
+    1. Fundo escuro: as partes escuras do logo viram brancas e as coloridas
+       ficam (ex.: texto do inDrive/Amazon no tema escuro, 'nu' na fatia roxa).
+    2. Se a maior parte do logo ainda tem a mesma cor do fundo (ex.: Inter
+       laranja na fatia laranja), ele todo vira silhueta branca ou preta.
+    """
+    visivel = logo[..., 3] > 127
+    if not visivel.any():
+        return logo
+    fundo = np.array([to_rgb(cor)])
+    luminancia = float(_luminancia(fundo)[0])
+    resultado = logo
+    if luminancia < 0.2:
+        lum = _luminancia(logo[..., :3].reshape(-1, 3) / 255).reshape(visivel.shape)
+        contraste = (np.maximum(lum, luminancia) + 0.05) / (np.minimum(lum, luminancia) + 0.05)
+        apagadas = visivel & (contraste < 1.5)
+        if apagadas.any():
+            resultado = np.array(logo, dtype=np.uint8)
+            resultado[apagadas, :3] = 255
+    opacos = resultado[visivel][:, :3] / 255
+    if (np.linalg.norm(_lab(opacos) - _lab(fundo), axis=1) < 25).mean() < 0.5:
+        return resultado
+    # branco ou preto: o que tiver mais contraste com o fundo
+    branco = 1.05 / (luminancia + 0.05) >= (luminancia + 0.05) / 0.05
+    silhueta = np.array(resultado, dtype=np.uint8)
+    silhueta[..., :3] = 255 if branco else 0
+    return silhueta
+
+
+@lru_cache(maxsize=None)
+def logo_da_fatia(rotulo):
+    """Logo do banco já ajustado para ficar sobre a cor da sua fatia, ou None."""
+    logo = logo_do_rotulo(rotulo)
+    return None if logo is None else logo_sobre_cor(logo, cor_categoria(rotulo))
+
+
+def imagens_nas_fatias(ax, wedges, imagens, largura=0.42, altura_pts=14, minimo_pts=6):
+    """Põe cada imagem (logo, emoji) dentro da sua fatia, encolhendo para caber.
+
+    Chame depois do título e da legenda: o espaço de cada fatia é medido no
+    tamanho final da rosca na tela. Fatia fina demais (imagem com menos de
+    `minimo_pts` de altura) fica sem imagem. Retorna os índices com imagem.
+    """
+    fig = ax.figure
+    fig.draw_without_rendering()  # aplica o layout para medir a rosca de verdade
+    x0 = ax.transData.transform((0, 0))[0]
+    pts_por_unidade = (ax.transData.transform((1, 0))[0] - x0) * 72 / fig.dpi
+    folga = 1  # respiro entre a imagem e a borda da fatia
+    raio = 1 - largura / 2
+    com_imagem = []
+    for i, (wedge, img) in enumerate(zip(wedges, imagens)):
+        if img is None:
+            continue
+        abertura = np.deg2rad(wedge.theta2 - wedge.theta1)
+        angulo = np.deg2rad((wedge.theta1 + wedge.theta2) / 2)
+        # espaço da fatia no anel: ao longo do arco (corda) e na espessura do anel
+        corda = 2 * raio * np.sin(min(abertura, np.pi) / 2)
+        no_arco = max(corda * pts_por_unidade * 0.95 - folga, 0)
+        no_anel = max(largura * pts_por_unidade * 0.9 - folga, 0)
+        # a imagem não gira: quanto dela cai em cada direção depende do ângulo
+        alt, larg = img.shape[:2]
+        seno, cosseno = abs(np.sin(angulo)), abs(np.cos(angulo))
+        zoom = min(altura_pts / alt, 2.6 * altura_pts / larg,
+                   no_arco / (larg * seno + alt * cosseno),
+                   no_anel / (larg * cosseno + alt * seno))
+        if zoom * alt < minimo_pts:
+            continue
+        caixa = AnnotationBbox(
+            OffsetImage(img, zoom=zoom), (raio * np.cos(angulo), raio * np.sin(angulo)),
+            frameon=False, zorder=5)
+        caixa.set_in_layout(False)  # não mexer no layout já medido
+        ax.add_artist(caixa)
+        com_imagem.append(i)
+    return com_imagem
+
+
+def legenda_com_logos(ax, handles, labels, imagem_de=logo_do_rotulo, altura=1.6,
+                      fundo=None, **opcoes):
+    """Legenda que troca o quadradinho de cor por uma imagem (logo, emoji) se houver.
+
+    `fundo`: cor atrás da legenda; logos da mesma cor viram silhueta para aparecer.
+    """
+    logos = {}
+    for handle, rotulo in zip(handles, labels):
+        imagem = imagem_de(rotulo)
+        if imagem is not None:
+            logos[handle] = logo_sobre_cor(imagem, fundo) if fundo else imagem
+    if not logos:
+        ax.legend(handles, labels, **opcoes)
+        return
+
+    # logos horizontais (ex.: "Santander") precisam de espaço largo para ler
+    maior_proporcao = max(l.shape[1] / l.shape[0] for l in logos.values())
+    opcoes.update(handleheight=altura,
+                  handlelength=altura * min(max(maior_proporcao, 1.0), 2.5))
+    mapa = {}
+    for handle in handles:
+        if handle in logos:
+            mapa[handle] = _HandlerLogo(logos[handle])
+        else:  # sem isso o quadradinho de cor esticaria até a largura do logo
+            mapa[handle] = HandlerPatch(
+                patch_func=_quadrado_legenda,
+                update_func=(update_from_first_child
+                             if isinstance(handle, BarContainer) else None))
+    ax.legend(handles, labels, handler_map=mapa, **opcoes)
+
+
+def somar_meses(data_texto, meses):
+    """'31/01/2026' + 1 mês -> '28/02/2026' (o dia é limitado ao fim do mês)."""
+    dia, mes, ano = (int(parte) for parte in data_texto.strip().split("/"))
+    ano, mes = divmod(ano * 12 + mes - 1 + meses, 12)
+    mes += 1
+    return f"{min(dia, calendar.monthrange(ano, mes)[1]):02d}/{mes:02d}/{ano:04d}"
+
+
+def descricao_parcela(gasto):
+    """'Parcelamento de Compras 3/12'."""
+    return f"{rotulo_categoria(gasto)} {gasto['parcela']}/{gasto['parcelas']}"
+
+
+def e_conta_fixa(gasto):
+    """Copiada mês a mês? Parcelados não: suas parcelas vêm de distribuir_parcelas."""
+    return gasto["categoria"] in CONTAS_FIXAS and not gasto.get("compra")
+
+
+def distribuir_parcelas(gastos):
+    """Cria, nos meses seguintes, as parcelas que faltam de cada compra/empréstimo.
+
+    As parcelas de uma compra têm o mesmo "compra" (id). A de menor número serve
+    de base; as que já existem não são recriadas. Retorna quantas criou.
+    """
+    por_compra = {}
+    for gasto in gastos:
+        if gasto.get("compra"):
+            por_compra.setdefault(gasto["compra"], []).append(gasto)
+    novas = []
+    for itens in por_compra.values():
+        base = min(itens, key=lambda g: g["parcela"])
+        if mes_do_gasto(base) is None:  # data inválida: não dá para contar meses
+            continue
+        existentes = {g["parcela"] for g in itens}
+        for numero in range(1, base["parcelas"] + 1):
+            if numero in existentes:
+                continue
+            nova = {**base, "parcela": numero,
+                    "data": somar_meses(base["data"], numero - base["parcela"])}
+            nova["descricao"] = descricao_parcela(nova)
+            novas.append(nova)
+    gastos.extend(novas)
+    return len(novas)
 
 
 def totais_por_categoria(gastos):
     """Retorna um dict {categoria: total} apenas com categorias que têm gasto."""
     totais = {}
     for gasto in gastos:
-        cat = gasto["categoria"]
+        cat = rotulo_categoria(gasto)
         totais[cat] = totais.get(cat, 0.0) + gasto["valor"]
     return totais
 
@@ -265,14 +712,20 @@ def _cor_progresso(pct):
 class CalculadorApp:
     def __init__(self, root):
         self.root = root
+        # Com o ibus (padrão do Ubuntu), o Tk registra cada widget no método de
+        # entrada e fica ~250x mais lento para criar telas e janelas. Os campos
+        # do app só recebem números e datas, então dispensa o método de entrada.
+        self.root.tk.call("tk", "useinputmethods", "0")
         self.root.title("Calculador de Gastos")
         self.root.geometry("1080x980")
         self.root.minsize(940, 800)
 
-        self.orcamentos, self.gastos = carregar_dados()
+        self.orcamentos, self.gastos, self.rendas = carregar_dados()
         self.mes_atual = mes_atual_chave()
         self._popup_mes = None
         self._toast_lbl = None
+        self._editando = None  # ("g" | "r", índice) enquanto edita um lançamento
+        self._redesenho = None  # after() pendente para redesenhar os gráficos do mês
 
         self._preparar_fontes()
         self._configurar_matplotlib()
@@ -298,10 +751,19 @@ class CalculadorApp:
         self.ft_pequena = ctk.CTkFont(family=fam, size=11)
 
     def _configurar_matplotlib(self):
-        # usa uma fonte que o matplotlib garante ter (a UI usa self.familia);
-        # se a família da UI também existir no matplotlib, aproveita.
-        disponiveis = {f.name for f in mpl.font_manager.fontManager.ttflist}
-        familia_mpl = self.familia if self.familia in disponiveis else "DejaVu Sans"
+        # os gráficos usam muito negrito: a fonte precisa ter o peso bold (700) de
+        # verdade, senão o matplotlib troca por outro peso e avisa no terminal
+        # (ex.: a Roboto do sistema só tem 400 e 500). Prefere a fonte da UI.
+        pesos = {}
+        for fonte in mpl.font_manager.fontManager.ttflist:
+            peso = fonte.weight
+            if isinstance(peso, str):
+                peso = mpl.font_manager.weight_dict.get(peso, 400)
+            pesos.setdefault(fonte.name, set()).add(peso)
+        candidatas = [self.familia, "Inter", "Segoe UI", "Roboto", "Ubuntu",
+                      "Cantarell", "Noto Sans", "Helvetica", "DejaVu Sans"]
+        familia_mpl = next((f for f in candidatas if max(pesos.get(f, {0})) >= 700),
+                           "DejaVu Sans")
         mpl.rcParams.update({
             "font.size": 9,
             "font.family": familia_mpl,
@@ -346,62 +808,81 @@ class CalculadorApp:
         self.root.after(2800, lambda: lbl.winfo_exists() and lbl.destroy())
 
     def _confirmar(self, titulo, mensagem):
-        """Diálogo modal de confirmação (Sim/Não) no estilo do app."""
+        """Diálogo modal de confirmação (Remover/Cancelar) no estilo do app."""
+        return self._escolher(titulo, mensagem, ["Remover"]) == "Remover"
+
+    def _escolher(self, titulo, mensagem, opcoes):
+        """Diálogo modal com um botão por opção (a última é a principal).
+
+        Retorna o texto da opção escolhida, ou None se cancelar/fechar.
+        """
+        largura = 380 if len(opcoes) == 1 else 540
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(titulo)
-        dlg.geometry("380x180")
+        dlg.geometry(f"{largura}x190")
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.after(50, dlg.grab_set)
-        resultado = {"ok": False}
+        resultado = [None]
 
         ctk.CTkLabel(dlg, text=titulo, font=self.ft_secao).pack(
             padx=24, pady=(22, 4), anchor="w")
-        ctk.CTkLabel(dlg, text=mensagem, font=self.ft_normal, wraplength=330,
-                     justify="left", text_color=SUB).pack(
+        ctk.CTkLabel(dlg, text=mensagem, font=self.ft_normal,
+                     wraplength=largura - 50, justify="left", text_color=SUB).pack(
             padx=24, anchor="w")
 
         botoes = ctk.CTkFrame(dlg, fg_color="transparent")
         botoes.pack(side="bottom", fill="x", padx=24, pady=20)
 
-        def sim():
-            resultado["ok"] = True
+        def escolher(opcao):
+            resultado[0] = opcao
             dlg.destroy()
 
-        ctk.CTkButton(botoes, text="Remover", fg_color=COR_NEG,
-                      hover_color="#C0392B", font=self.ft_bold,
-                      command=sim, width=110).pack(side="right", padx=(8, 0))
+        for i, opcao in enumerate(reversed(opcoes)):  # pack da direita p/ esquerda
+            principal = i == 0
+            ctk.CTkButton(botoes, text=opcao, font=self.ft_bold,
+                          fg_color=COR_NEG if principal else "transparent",
+                          hover_color="#C0392B" if principal else CARD2,
+                          text_color="white" if principal else COR_NEG,
+                          border_width=0 if principal else 1, border_color=COR_NEG,
+                          command=lambda o=opcao: escolher(o)).pack(
+                side="right", padx=(8, 0))
         ctk.CTkButton(botoes, text="Cancelar", fg_color="transparent",
                       border_width=1, border_color=BORDA,
                       text_color=TEXTO, hover_color=CARD2,
                       font=self.ft_bold, command=dlg.destroy,
                       width=110).pack(side="right")
         dlg.wait_window()
-        return resultado["ok"]
+        return resultado[0]
 
     # ------------------------------------------------------------------ mês ---
     def gastos_do_mes(self):
         return [g for g in self.gastos if mes_do_gasto(g) == self.mes_atual]
 
+    def rendas_do_mes(self):
+        return [r for r in self.rendas if mes_do_gasto(r) == self.mes_atual]
+
     def orcamento_do_mes(self):
         return self.orcamentos.get(self.mes_atual, 0.0)
 
-    def meses_disponiveis(self):
-        chaves = set(self.orcamentos.keys())
-        for gasto in self.gastos:
-            chave = mes_do_gasto(gasto)
-            if chave:
-                chaves.add(chave)
-        chaves.add(self.mes_atual)
-        return sorted(chaves, reverse=True)
+    def renda_do_mes(self):
+        return sum(r["valor"] for r in self.rendas_do_mes())
+
+    def disponivel_do_mes(self):
+        """Orçamento do mês: salário somado às rendas extras lançadas nele."""
+        return self.orcamento_do_mes() + self.renda_do_mes()
 
     def _meses_com_dados_asc(self):
         chaves = set(self.orcamentos.keys())
-        for gasto in self.gastos:
-            chave = mes_do_gasto(gasto)
+        for item in self.gastos + self.rendas:
+            chave = mes_do_gasto(item)
             if chave:
                 chaves.add(chave)
         return sorted(chaves)
+
+    def meses_disponiveis(self):
+        return sorted(set(self._meses_com_dados_asc()) | {self.mes_atual},
+                      reverse=True)
 
     def _ir_para_mes(self, delta):
         ano, mes = (int(x) for x in self.mes_atual.split("-"))
@@ -421,20 +902,25 @@ class CalculadorApp:
 
     def _sincronizar_mes(self):
         self.mes_btn.configure(text=nome_mes(self.mes_atual))
-        self.orc_var.set(f"{self.orcamento_do_mes():.2f}".replace(".", ","))
+        self.orc_var.set(formatar_numero(self.orcamento_do_mes()))
+        self._preencher_renda()
         self._atualizar_tudo()
 
     # ---- calendário pop-up de mês/ano ----
-    def _abrir_seletor_mes(self):
+    def _abrir_seletor_mes(self, ancora=None, selecionado=None, ao_escolher=None):
+        """Calendário de mês/ano. Sem argumentos: troca o mês exibido no app."""
         self._fechar_popup_mes()
+        self._popup_ancora = ancora or self.mes_btn
+        self._popup_selecionado = selecionado or self.mes_atual
+        self._popup_ao_escolher = ao_escolher or self._ir_para_chave
         pop = ctk.CTkToplevel(self.root)
         pop.overrideredirect(True)
         pop.attributes("-topmost", True)
         self._popup_mes = pop
-        self._ano_popup = int(self.mes_atual.split("-")[0])
+        self._ano_popup = int(self._popup_selecionado.split("-")[0])
 
-        x = self.mes_btn.winfo_rootx()
-        y = self.mes_btn.winfo_rooty() + self.mes_btn.winfo_height() + 6
+        x = self._popup_ancora.winfo_rootx()
+        y = self._popup_ancora.winfo_rooty() + self._popup_ancora.winfo_height() + 6
         pop.geometry(f"+{x}+{y}")
 
         self._popup_inner = ctk.CTkFrame(pop, fg_color=CARD,
@@ -462,7 +948,7 @@ class CalculadorApp:
         if not pop or not pop.winfo_exists():
             return
         clicado = str(evento.widget)
-        if not clicado.startswith(str(pop)) and evento.widget is not self.mes_btn:
+        if not clicado.startswith(str(pop)) and evento.widget is not self._popup_ancora:
             self._fechar_popup_mes()
 
     def _mudar_ano_popup(self, delta):
@@ -470,8 +956,12 @@ class CalculadorApp:
         self._render_popup_mes()
 
     def _escolher_mes_popup(self, chave):
-        self.mes_atual = chave
+        ao_escolher = self._popup_ao_escolher
         self._fechar_popup_mes()
+        ao_escolher(chave)
+
+    def _ir_para_chave(self, chave):
+        self.mes_atual = chave
         self._sincronizar_mes()
 
     def _render_popup_mes(self):
@@ -499,7 +989,7 @@ class CalculadorApp:
         for i, abrev in enumerate(MESES_ABREV):
             linha, coluna = divmod(i, 3)
             chave = f"{self._ano_popup:04d}-{i + 1:02d}"
-            selecionado = chave == self.mes_atual
+            selecionado = chave == self._popup_selecionado
             tem_dados = chave in com_dados
             if selecionado:
                 fg, hover, txt = ACCENT, ACCENT_HOVER, "white"
@@ -608,33 +1098,59 @@ class CalculadorApp:
                       command=self._copiar_contas_fixas).pack(side="right")
 
     def _montar_cards(self, parent):
+        # ---- linha 1 (compacta): de onde vem o dinheiro ----
+        self.entradas = ctk.CTkFrame(parent, fg_color="transparent")
+        self.entradas.pack(fill="x", pady=(14, 0))
+        for i in range(COLUNAS_ENTRADAS):
+            self.entradas.columnconfigure(i, weight=1, uniform="entradas")
+
+        self.card_salario_valor = self._criar_card(
+            self.entradas, 0, "💼", "SALÁRIO", COR_RENDA, compacto=True)
+        self.card_renda_valor = self._criar_card(
+            self.entradas, 1, "💵", "RENDAS EXTRAS", COR_RENDA, compacto=True)
+        self.card_app_valor = {}  # só apps com renda no mês; ver _atualizar_cards_apps
+        self._apps_nos_cards = ()
+        self._logos_cards = {app: logo_ctk(app, 20) for app in APPS_DELIVERY}
+
+        # ---- linha 2: orçamento (salário + rendas), gasto e restante ----
         cards = ctk.CTkFrame(parent, fg_color="transparent")
-        cards.pack(fill="x", pady=(14, 10))
+        cards.pack(fill="x", pady=(2, 10))
         for i in range(3):
             cards.columnconfigure(i, weight=1, uniform="cards")
 
         self.card_orc_valor = self._criar_card(cards, 0, "🎯", "ORÇAMENTO", ACCENT)
         self.card_gasto_valor = self._criar_card(cards, 1, "💸", "TOTAL GASTO",
                                                  COR_GASTO)
-        (self.card_rest_icone, self.card_rest_titulo,
-         self.card_rest_valor) = self._criar_card(cards, 2, "🟢", "RESTANTE",
+        (_icone, self.card_rest_titulo,
+         self.card_rest_valor) = self._criar_card(cards, 2, "💰", "RESTANTE",
                                                   COR_POS, completo=True)
 
-    def _criar_card(self, parent, coluna, icone, titulo, cor_valor, completo=False):
+    def _criar_card(self, parent, coluna, icone, titulo, cor_valor, completo=False,
+                    compacto=False, logo=None, linha=0):
         card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=14)
-        card.grid(row=0, column=coluna, sticky="nsew", padx=6)
+        card.grid(row=linha, column=coluna, sticky="nsew", padx=6,
+                  pady=(0, 8) if compacto else 0)
+        margem = 12 if compacto else 18
 
         topo = ctk.CTkFrame(card, fg_color="transparent")
-        topo.pack(fill="x", padx=18, pady=(14, 0))
-        icone_lbl = ctk.CTkLabel(topo, text=icone, font=self.ft_valor_pq)
-        icone_lbl.pack(side="left")
-        titulo_lbl = ctk.CTkLabel(topo, text=titulo, text_color=SUB,
-                                  font=self.ft_rotulo)
-        titulo_lbl.pack(side="left", padx=8)
+        topo.pack(fill="x", padx=margem, pady=(10 if compacto else 14, 0))
+        if logo:  # o logo já identifica: dispensa ícone e título
+            icone_lbl = titulo_lbl = ctk.CTkLabel(topo, text="", image=logo,
+                                                  height=24,
+                                                  corner_radius=6, padx=4)
+            icone_lbl.pack(side="left")
+        else:
+            icone_lbl = ctk.CTkLabel(topo, text=icone, height=24, font=(
+                self.ft_bold if compacto else self.ft_valor_pq))
+            icone_lbl.pack(side="left")
+            titulo_lbl = ctk.CTkLabel(topo, text=titulo, text_color=SUB,
+                                      height=24, font=self.ft_rotulo)
+            titulo_lbl.pack(side="left", padx=6 if compacto else 8)
 
         valor_lbl = ctk.CTkLabel(card, text="R$ 0,00", text_color=cor_valor,
-                                 font=self.ft_valor)
-        valor_lbl.pack(anchor="w", padx=18, pady=(2, 16))
+                                 font=self.ft_valor_pq if compacto else self.ft_valor)
+        valor_lbl.pack(anchor="w", padx=margem, pady=(0 if compacto else 2,
+                                                     10 if compacto else 16))
 
         if completo:
             return icone_lbl, titulo_lbl, valor_lbl
@@ -660,22 +1176,41 @@ class CalculadorApp:
     def _montar_aba_lancamentos(self, parent):
         parent.configure(fg_color="transparent")
 
-        # ---- Card: definir orçamento ----
-        ctk.CTkLabel(parent, text="Orçamento", font=self.ft_secao).pack(
-            anchor="w", padx=4, pady=(6, 4))
-        orc = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=12)
-        orc.pack(fill="x", pady=(0, 14))
-        ctk.CTkLabel(orc, text="Orçamento do mês (R$):", font=self.ft_normal).pack(
-            side="left", padx=(16, 8), pady=14)
+        # ---- Cards lado a lado: salário | renda extra ----
+        topo = ctk.CTkFrame(parent, fg_color="transparent")
+        topo.pack(fill="x", pady=(6, 14))
+        topo.columnconfigure(0, weight=1, uniform="topo")
+        topo.columnconfigure(1, weight=1, uniform="topo")
+
+        orc = ctk.CTkFrame(topo, fg_color=CARD2, corner_radius=12)
+        orc.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        cabecalho = ctk.CTkFrame(orc, fg_color="transparent")
+        cabecalho.pack(fill="x", padx=16, pady=(12, 6))
+        ctk.CTkLabel(cabecalho, text="💼  Salário", font=self.ft_secao).pack(
+            side="left")
+        self.btn_limpar_salario = ctk.CTkButton(
+            cabecalho, text="🧹  Limpar", width=90, height=26, font=self.ft_pequena,
+            fg_color="transparent", text_color=COR_NEG, hover_color=CARD,
+            border_width=1, border_color=COR_NEG, command=self.limpar_salario)
+        self.btn_limpar_salario.pack(side="right")
+
+        linha_orc = ctk.CTkFrame(orc, fg_color="transparent")
+        linha_orc.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkLabel(linha_orc, text="R$", text_color=SUB,
+                     font=self.ft_rotulo).pack(side="left", padx=(0, 6))
         self.orc_var = tk.StringVar(
-            value=f"{self.orcamento_do_mes():.2f}".replace(".", ","))
-        orc_entry = ctk.CTkEntry(orc, textvariable=self.orc_var, width=140,
+            value=formatar_numero(self.orcamento_do_mes()))
+        orc_entry = ctk.CTkEntry(linha_orc, textvariable=self.orc_var, width=140,
                                  font=self.ft_normal)
         orc_entry.pack(side="left")
         orc_entry.bind("<Return>", lambda e: self.definir_orcamento())
-        ctk.CTkButton(orc, text="Salvar", width=110, font=self.ft_bold,
+        self._campo_dinheiro(orc_entry, self.orc_var)
+        ctk.CTkButton(linha_orc, text="Salvar", width=100, font=self.ft_bold,
                       fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                      command=self.definir_orcamento).pack(side="left", padx=12)
+                      command=self.definir_orcamento).pack(side="left", padx=10)
+
+
+        self._montar_painel_renda(topo)
 
         # ---- Card: novo gasto ----
         ctk.CTkLabel(parent, text="Novo gasto", font=self.ft_secao).pack(
@@ -690,25 +1225,64 @@ class CalculadorApp:
                          font=self.ft_rotulo).grid(row=r, column=c, sticky="w",
                                                    padx=14, pady=(12, 2))
 
-        rotulo("DESCRIÇÃO", 0, 0)
-        self.desc_var = tk.StringVar()
-        ctk.CTkEntry(form, textvariable=self.desc_var, font=self.ft_normal).grid(
-            row=1, column=0, sticky="we", padx=14, pady=(0, 8))
-
-        rotulo("VALOR (R$)", 0, 1)
+        self.valor_rotulo = ctk.CTkLabel(form, text="VALOR (R$)", text_color=SUB,
+                                         font=self.ft_rotulo)
+        self.valor_rotulo.grid(row=0, column=0, sticky="w", padx=14, pady=(12, 2))
         self.valor_var = tk.StringVar()
         valor_entry = ctk.CTkEntry(form, textvariable=self.valor_var,
                                    font=self.ft_normal)
-        valor_entry.grid(row=1, column=1, sticky="we", padx=14, pady=(0, 8))
+        valor_entry.grid(row=1, column=0, sticky="we", padx=14, pady=(0, 8))
         valor_entry.bind("<Return>", lambda e: self.adicionar_gasto())
+        self._campo_dinheiro(valor_entry, self.valor_var)
+
+        self.data_rotulo = ctk.CTkLabel(form, text="DATA", text_color=SUB,
+                                        font=self.ft_rotulo)
+        self.data_rotulo.grid(row=0, column=1, sticky="w", padx=14, pady=(12, 2))
+        self.data_var = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
+        linha_data = ctk.CTkFrame(form, fg_color="transparent")
+        linha_data.grid(row=1, column=1, sticky="we", padx=14, pady=(0, 8))
+        ctk.CTkEntry(linha_data, textvariable=self.data_var, font=self.ft_normal).pack(
+            side="left", fill="x", expand=True)
+        self.btn_data = ctk.CTkButton(linha_data, text="📅", width=36, font=self.ft_bold,
+                                      fg_color=CARD, hover_color=BORDA, text_color=TEXTO,
+                                      command=self._escolher_mes_da_data)
+        self.btn_data.pack(side="left", padx=(6, 0))
 
         rotulo("CATEGORIA", 2, 0)
         self.cat_var = tk.StringVar(value=CATEGORIAS[0])
         ctk.CTkOptionMenu(form, variable=self.cat_var, values=CATEGORIAS,
                           font=self.ft_normal, fg_color=CARD,
                           button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-                          text_color=TEXTO).grid(
+                          text_color=TEXTO,
+                          command=lambda _v: self._mostrar_instituicao()).grid(
             row=3, column=0, sticky="we", padx=14, pady=(0, 12))
+
+        # só aparece quando a categoria é fatura de cartão
+        self.inst_rotulo = ctk.CTkLabel(form, text="INSTITUIÇÃO", text_color=SUB,
+                                        font=self.ft_rotulo)
+        self.inst_rotulo.grid(row=4, column=0, sticky="w", padx=14, pady=(12, 2))
+        self.inst_var = tk.StringVar(value=next(iter(INSTITUICOES)))
+        self.inst_menu = ctk.CTkOptionMenu(
+            form, variable=self.inst_var, values=list(INSTITUICOES),
+            font=self.ft_normal, fg_color=CARD, text_color=TEXTO,
+            command=lambda _v: self._mostrar_instituicao())
+        self.inst_menu.grid(row=5, column=0, sticky="we", padx=14, pady=(0, 12))
+
+        # mesmo lugar: só aparece para parcelamento de compras
+        self.parc_rotulo = ctk.CTkLabel(form, text="PARCELAS", text_color=SUB,
+                                        font=self.ft_rotulo)
+        self.parc_rotulo.grid(row=4, column=0, sticky="w", padx=14, pady=(12, 2))
+        primeira = next(iter(CATEGORIAS_PARCELADAS.values()))[0][0]
+        self.parcelas_var = tk.StringVar(value=primeira)
+        self._ultima_parcela = primeira  # volta para ela se "Outra…" for cancelada
+        self._categoria_parcelas = None  # trocar de categoria reinicia a quantidade
+        self.parc_menu = ctk.CTkOptionMenu(
+            form, variable=self.parcelas_var, values=[primeira],
+            font=self.ft_normal, fg_color=CARD, text_color=TEXTO,
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+            command=self._escolheu_parcelas)
+        self.parc_menu.grid(row=5, column=0, sticky="we", padx=14, pady=(0, 12))
+        self._mostrar_instituicao()
 
         rotulo("CARTÃO / PAGAMENTO", 2, 1)
         self.cartao_var = tk.StringVar(value=CARTOES[0])
@@ -718,15 +1292,12 @@ class CalculadorApp:
                           text_color=TEXTO).grid(
             row=3, column=1, sticky="we", padx=14, pady=(0, 12))
 
-        rotulo("DATA", 4, 0)
-        self.data_var = tk.StringVar(value=date.today().strftime("%d/%m/%Y"))
-        ctk.CTkEntry(form, textvariable=self.data_var, font=self.ft_normal).grid(
-            row=5, column=0, sticky="we", padx=14, pady=(0, 14))
-
-        ctk.CTkButton(form, text="➕  Adicionar gasto", font=self.ft_bold,
-                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                      command=self.adicionar_gasto).grid(
-            row=5, column=1, sticky="we", padx=14, pady=(0, 14))
+        # na linha da instituição: fica ao lado dela quando ela aparece
+        self.btn_add_gasto = ctk.CTkButton(
+            form, text="➕  Adicionar gasto", font=self.ft_bold,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            command=self.adicionar_gasto)
+        self.btn_add_gasto.grid(row=5, column=1, sticky="we", padx=14, pady=(0, 14))
 
         # ---- Barra de filtros ----
         barra = ctk.CTkFrame(parent, fg_color="transparent")
@@ -755,23 +1326,29 @@ class CalculadorApp:
                       fg_color="transparent", text_color=COR_NEG,
                       hover_color=CARD2, border_width=1,
                       border_color=COR_NEG,
-                      command=self.remover_gasto).pack(side="right", padx=4)
+                      command=self.remover_lancamento).pack(side="right", padx=4)
+        self.btn_editar = ctk.CTkButton(
+            barra, text="✏️  Editar selecionado", font=self.ft_bold,
+            fg_color="transparent", text_color=ACCENT, hover_color=CARD2,
+            border_width=1, border_color=ACCENT, command=self.editar_lancamento)
+        self.btn_editar.pack(side="right", padx=4)
+        ctk.CTkButton(barra, text="🧹  Limpar mês", font=self.ft_bold,
+                      fg_color=COR_NEG, hover_color="#C0392B",
+                      command=self.limpar_lancamentos).pack(side="right", padx=4)
 
         # ---- Tabela ----
         tabela_frame = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
         tabela_frame.pack(fill="both", expand=True)
 
-        colunas = ("data", "descricao", "categoria", "cartao", "valor")
+        colunas = ("data", "categoria", "cartao", "valor")
         self.tree = ttk.Treeview(tabela_frame, columns=colunas, show="headings",
                                  selectmode="browse")
         self.tree.heading("data", text="DATA")
-        self.tree.heading("descricao", text="DESCRIÇÃO")
         self.tree.heading("categoria", text="CATEGORIA")
         self.tree.heading("cartao", text="CARTÃO")
         self.tree.heading("valor", text="VALOR")
         self.tree.column("data", width=84, anchor="center")
-        self.tree.column("descricao", width=250)
-        self.tree.column("categoria", width=120, anchor="center")
+        self.tree.column("categoria", width=220, anchor="center")
         self.tree.column("cartao", width=130, anchor="center")
         self.tree.column("valor", width=120, anchor="e")
 
@@ -779,15 +1356,202 @@ class CalculadorApp:
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
         scroll.pack(side="right", fill="y", padx=(0, 8), pady=10)
+        self.tree.bind("<Double-1>", lambda e: (self._cancelar_edicao(),
+                                                self.editar_lancamento()))
+
+    def _campo_dinheiro(self, entry, var):
+        """Máscara estilo app de banco: só dígitos, que entram pelos centavos."""
+        novo = [True]  # 1ª tecla depois de focar começa um valor novo
+
+        def mostrar(centavos):
+            var.set(formatar_numero(centavos / 100))
+            entry.select_clear()  # a seleção sobrevive ao var.set e zeraria a próxima tecla
+            entry.icursor("end")
+            novo[0] = False
+
+        def focar(_evento):
+            novo[0] = True
+            entry.after_idle(lambda: entry.select_range(0, "end"))
+
+        def tecla(evento):
+            if evento.keysym in ("Tab", "ISO_Left_Tab"):
+                return None
+            ctrl = evento.state & 0x4
+            if ctrl and evento.keysym.lower() == "v":
+                try:
+                    mostrar(centavos_do_texto(entry.clipboard_get()))
+                except tk.TclError:  # área de transferência vazia
+                    pass
+                return "break"
+            if ctrl:  # Ctrl+A, Ctrl+C...
+                return None
+            atual = (0 if novo[0] or entry.select_present()
+                     else centavos_do_texto(var.get()))
+            if evento.char and evento.char in "0123456789":
+                valor = atual * 10 + int(evento.char)
+                if valor <= MAX_CENTAVOS:
+                    mostrar(valor)
+            elif evento.keysym in ("BackSpace", "Delete"):
+                mostrar(atual // 10)
+            return "break"  # letras, símbolos e setas não entram
+
+        entry.bind("<FocusIn>", focar)
+        entry.bind("<KeyPress>", tecla)
+        entry.bind("<Button-2>", lambda e: "break")  # colar com o botão do meio (X11)
+
+    def _mostrar_instituicao(self):
+        """Mostra o 2º seletor (banco, transporte, parcelas) conforme a categoria."""
+        regra = CATEGORIAS_PARCELADAS.get(self.cat_var.get())
+        parcelado = regra is not None
+        self.valor_rotulo.configure(
+            text="VALOR DA PARCELA (R$)" if parcelado else "VALOR (R$)")
+        self.data_rotulo.configure(text="1ª PARCELA EM" if parcelado else "DATA")
+        if parcelado:  # destaque: aqui se escolhe o começo do parcelamento
+            cor = CATEGORIA_CORES.get(self.cat_var.get(), ACCENT)
+            self.btn_data.configure(text="📅  Início", width=96, fg_color=cor,
+                                    hover_color=cor, text_color=TEXTO_SOBRE.get(cor, "white"))
+        else:
+            self.btn_data.configure(text="📅", width=36, fg_color=CARD, hover_color=BORDA,
+                                    text_color=TEXTO)
+        for widget in (self.parc_rotulo, self.parc_menu):
+            widget.grid() if parcelado else widget.grid_remove()
+        trocou = self.cat_var.get() != self._categoria_parcelas
+        self._categoria_parcelas = self.cat_var.get()
+        if parcelado:
+            rapidas, maximo = regra
+            atual = None if trocou else quantidade_parcelas(self.parcelas_var.get(), maximo)
+            if atual is None:  # nova categoria (ou valor inválido): 1ª opção rápida
+                atual = quantidade_parcelas(rapidas[0], maximo)
+            self.parcelas_var.set(f"{atual}x")
+            self._ultima_parcela = f"{atual}x"
+            # quantidade digitada em "Outra…" entra no menu, em ordem
+            numeros = sorted({int(o.rstrip("x")) for o in rapidas} | {atual})
+            cor = CATEGORIA_CORES.get(self.cat_var.get(), ACCENT)
+            self.parc_menu.configure(values=[f"{n}x" for n in numeros] + [OUTRA_QUANTIDADE],
+                                     button_color=cor, button_hover_color=cor)
+        sub = SUBCATEGORIAS.get(self.cat_var.get())
+        if not sub:
+            self.inst_rotulo.grid_remove()
+            self.inst_menu.grid_remove()
+            return
+        _prefixo, titulo, opcoes = sub
+        if self.inst_var.get() not in opcoes:  # trocou fatura <-> transporte
+            self.inst_var.set(next(iter(opcoes)))
+        cor = opcoes[self.inst_var.get()]
+        self.inst_rotulo.configure(text=titulo)
+        self.inst_menu.configure(values=list(opcoes), button_color=cor,
+                                 button_hover_color=cor)
+        self.inst_rotulo.grid()
+        self.inst_menu.grid()
+
+    def _escolheu_parcelas(self, valor):
+        """No menu de parcelas, 'Outra…' pede a quantidade digitada."""
+        regra = CATEGORIAS_PARCELADAS.get(self.cat_var.get())
+        if valor != OUTRA_QUANTIDADE or not regra:
+            self._ultima_parcela = valor
+            return
+        maximo = regra[1]
+        texto = self._pedir_texto("Quantidade de parcelas",
+                                  f"Digite a quantidade de parcelas (2 a {maximo}):")
+        n = quantidade_parcelas(texto, maximo)
+        if n is None:
+            if texto is not None:
+                self._toast(f"Informe um número de 2 a {maximo}.", "erro")
+            self.parcelas_var.set(self._ultima_parcela)
+        else:
+            self.parcelas_var.set(f"{n}x")
+        self._mostrar_instituicao()
+
+    def _pedir_texto(self, titulo, pergunta):
+        """Caixa para digitar; retorna o texto ou None se cancelar."""
+        return ctk.CTkInputDialog(title=titulo, text=pergunta).get_input()
+
+    def _escolher_mes_da_data(self):
+        """📅: escolhe mês/ano no calendário, mantendo o dia digitado."""
+        def definir(chave):
+            ano, mes = (int(x) for x in chave.split("-"))
+            dia = min(dia_de_data(self.data_var.get()), calendar.monthrange(ano, mes)[1])
+            self.data_var.set(f"{dia:02d}/{mes:02d}/{ano:04d}")
+
+        atual = mes_de_data(self.data_var.get()) or self.mes_atual
+        self._abrir_seletor_mes(self.btn_data, atual, definir)
+
+    def _montar_painel_renda(self, parent):
+        """Painel de renda extra, ao lado do salário."""
+        card = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=12)
+        card.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        cabecalho = ctk.CTkFrame(card, fg_color="transparent")
+        cabecalho.pack(fill="x", padx=16, pady=(12, 6))
+        ctk.CTkLabel(cabecalho, text="💵  Renda extra", font=self.ft_secao).pack(
+            side="left")
+        self.btn_limpar_rendas = ctk.CTkButton(
+            cabecalho, text="🧹  Limpar", width=90, height=26, font=self.ft_pequena,
+            fg_color="transparent", text_color=COR_NEG, hover_color=CARD,
+            border_width=1, border_color=COR_NEG, command=self.limpar_rendas)
+        self.btn_limpar_rendas.pack(side="right")
+
+        linha_valor = ctk.CTkFrame(card, fg_color="transparent")
+        linha_valor.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkLabel(linha_valor, text="R$", text_color=SUB,
+                     font=self.ft_rotulo).pack(side="left", padx=(0, 6))
+        self.renda_valor_var = tk.StringVar()
+        valor_entry = ctk.CTkEntry(linha_valor, textvariable=self.renda_valor_var,
+                                   width=110, font=self.ft_normal)
+        valor_entry.pack(side="left")
+        valor_entry.bind("<Return>", lambda e: self.definir_renda())
+        self._campo_dinheiro(valor_entry, self.renda_valor_var)
+
+        self.renda_fonte_var = tk.StringVar(value=FONTES_RENDA[0])
+        ctk.CTkOptionMenu(linha_valor, variable=self.renda_fonte_var,
+                          values=FONTES_RENDA, width=140, font=self.ft_normal,
+                          fg_color=CARD, button_color=COR_RENDA,
+                          button_hover_color=COR_RENDA_HOVER, text_color=TEXTO,
+                          command=lambda _v: self._mostrar_app_delivery()).pack(
+            side="left", padx=8)
+
+        ctk.CTkButton(linha_valor, text="Salvar", width=100, font=self.ft_bold,
+                      fg_color=COR_RENDA, hover_color=COR_RENDA_HOVER,
+                      command=self.definir_renda).pack(side="left")
+
+        # só aparece quando a fonte é delivery
+        self.linha_app = ctk.CTkFrame(card, fg_color="transparent")
+        ctk.CTkLabel(self.linha_app, text="APP", text_color=SUB,
+                     font=self.ft_rotulo).pack(side="left", padx=(0, 6))
+        self.renda_app_var = tk.StringVar(value=next(iter(APPS_DELIVERY)))
+        self.renda_app_menu = ctk.CTkOptionMenu(
+            self.linha_app, variable=self.renda_app_var, values=list(APPS_DELIVERY),
+            width=140, font=self.ft_normal, fg_color=CARD, text_color=TEXTO,
+            command=lambda _v: self._mostrar_app_delivery())
+        self.renda_app_menu.pack(side="left")
+        self.renda_app_logo = ctk.CTkLabel(self.linha_app, text="", height=30,
+                                           corner_radius=6, padx=4)
+        self.renda_app_logo.pack(side="left", padx=12)
+        self._logos_apps = {app: logo_ctk(app, 26) for app in APPS_DELIVERY}
+        self._mostrar_app_delivery()
+
+    def _mostrar_app_delivery(self):
+        """Mostra o seletor de app (com cor e logo) só para a fonte delivery."""
+        self._preencher_renda()
+        if self.renda_fonte_var.get() != FONTE_DELIVERY:
+            self.linha_app.pack_forget()
+            return
+        app = self.renda_app_var.get()
+        cor = APPS_DELIVERY[app]
+        self.renda_app_menu.configure(button_color=cor, button_hover_color=cor)
+        logo = self._logos_apps[app]
+        self.renda_app_logo.configure(image=logo, text="" if logo else app,
+                                      fg_color="transparent")
+        self.linha_app.pack(fill="x", padx=16, pady=(0, 14))
 
     def _montar_aba_graficos(self, parent):
         parent.configure(fg_color="transparent")
-        parent.columnconfigure(0, weight=1)
-        parent.columnconfigure(1, weight=1)
-        parent.rowconfigure(0, weight=3)
-        parent.rowconfigure(1, weight=2)
+        # rosca de categorias grande à esquerda; barras e pagamentos menores à direita
+        parent.columnconfigure(0, weight=3, uniform="graficos")
+        parent.columnconfigure(1, weight=2, uniform="graficos")
+        parent.rowconfigure(0, weight=1, uniform="linhas_graficos")
+        parent.rowconfigure(1, weight=1, uniform="linhas_graficos")
 
-        self.canvas_pizza = self._criar_canvas_grafico(parent, 0, 0)
+        self.canvas_pizza = self._criar_canvas_grafico(parent, 0, 0, rowspan=2)
         self.fig_pizza = self.canvas_pizza.figure
         self.ax_pizza = self.fig_pizza.add_subplot(111)
 
@@ -795,15 +1559,30 @@ class CalculadorApp:
         self.fig_barras = self.canvas_barras.figure
         self.ax_barras = self.fig_barras.add_subplot(111)
 
-        self.canvas_cartao = self._criar_canvas_grafico(parent, 1, 0, columnspan=2)
+        self.canvas_cartao = self._criar_canvas_grafico(parent, 1, 1)
         self.fig_cartao = self.canvas_cartao.figure
         self.ax_cartao = self.fig_cartao.add_subplot(111)
 
-    def _criar_canvas_grafico(self, parent, linha, coluna, columnspan=1):
+        # o tamanho dos logos/emojis nas fatias depende do tamanho da rosca na tela
+        for canvas in (self.canvas_pizza, self.canvas_cartao):
+            canvas.get_tk_widget().bind("<Configure>", self._agendar_redesenho, add="+")
+
+    def _agendar_redesenho(self, _evento=None):
+        """Redesenha os gráficos do mês logo após a janela/aba mudar de tamanho."""
+        if self._redesenho:
+            self.root.after_cancel(self._redesenho)
+        self._redesenho = self.root.after(150, self._redesenhar_graficos)
+
+    def _redesenhar_graficos(self):
+        self._redesenho = None
+        self._atualizar_graficos()
+
+    def _criar_canvas_grafico(self, parent, linha, coluna, columnspan=1, rowspan=1):
         moldura = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
         moldura.grid(row=linha, column=coluna, columnspan=columnspan,
-                     sticky="nsew", padx=6, pady=6)
-        fig = Figure(figsize=(4.4, 3.4), dpi=100, layout="constrained")
+                     rowspan=rowspan, sticky="nsew", padx=6, pady=6)
+        # tamanho inicial pequeno: quem manda no tamanho final são os pesos do grid
+        fig = Figure(figsize=(3.0, 2.0), dpi=100, layout="constrained")
         canvas = FigureCanvasTkAgg(fig, master=moldura)
         canvas.get_tk_widget().configure(highlightthickness=0)
         canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
@@ -865,120 +1644,434 @@ class CalculadorApp:
     def definir_orcamento(self):
         valor = self._parse_valor(self.orc_var.get())
         if valor is None or valor < 0:
-            self._toast("Informe um orçamento numérico válido.", "erro")
+            self._toast("Informe um salário numérico válido.", "erro")
             return
         self.orcamentos[self.mes_atual] = valor
-        salvar_dados(self.orcamentos, self.gastos)
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
         self._atualizar_tudo()
-        self._toast(f"Orçamento de {nome_mes(self.mes_atual)} salvo.", "sucesso")
+        self._toast(f"Salário de {nome_mes(self.mes_atual)} salvo.", "sucesso")
+
+    def _data_no_mes(self):
+        """Hoje, se o mês exibido for o atual; senão, dia 1º do mês exibido."""
+        if self.mes_atual == mes_atual_chave():
+            return date.today().strftime("%d/%m/%Y")
+        ano, mes = self.mes_atual.split("-")
+        return f"01/{mes}/{ano}"
+
+    def _renda_escolhida(self):
+        """(fonte, app) escolhidos no painel; app só existe no delivery."""
+        fonte = self.renda_fonte_var.get()
+        return fonte, (self.renda_app_var.get() if fonte == FONTE_DELIVERY else None)
+
+    def _preencher_renda(self):
+        """Mostra no campo o valor já salvo no mês para a fonte/app escolhidos."""
+        fonte, app = self._renda_escolhida()
+        total = sum(r["valor"] for r in self.rendas
+                    if mesma_renda(r, self.mes_atual, fonte, app))
+        self.renda_valor_var.set(formatar_numero(total))
+
+    def definir_renda(self):
+        """Como o salário: grava o valor do mês para a fonte/app (0 remove)."""
+        valor = self._parse_valor(self.renda_valor_var.get())
+        if valor is None or valor < 0:
+            self._toast("Informe um valor de renda numérico válido.", "erro")
+            return
+
+        fonte, app = self._renda_escolhida()
+        self.rendas = [r for r in self.rendas
+                       if not mesma_renda(r, self.mes_atual, fonte, app)]
+        if valor > 0:
+            nova = {"data": self._data_no_mes(), "fonte": fonte, "valor": valor}
+            if app:
+                nova["app"] = app
+            nova["descricao"] = rotulo_renda(nova)
+            self.rendas.append(nova)
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._preencher_renda()
+        self._atualizar_tudo()
+        nome, mes = app or fonte, nome_mes(self.mes_atual)
+        if valor:
+            self._toast(f"{nome} de {mes} salvo ({formatar_moeda(valor)}).", "sucesso")
+        else:
+            self._toast(f"{nome} de {mes} removido.", "sucesso")
 
     def adicionar_gasto(self):
-        descricao = self.desc_var.get().strip()
         valor = self._parse_valor(self.valor_var.get())
         categoria = self.cat_var.get()
         cartao = self.cartao_var.get()
         data_texto = self.data_var.get().strip()
 
-        if not descricao:
-            self._toast("Informe uma descrição.", "erro")
-            return
         if valor is None or valor <= 0:
             self._toast("Informe um valor maior que zero.", "erro")
+            return
+        regra = CATEGORIAS_PARCELADAS.get(categoria)
+        n_parcelas = quantidade_parcelas(self.parcelas_var.get(), regra[1]) if regra else None
+        if regra and n_parcelas is None:
+            self._toast(f"Escolha a quantidade de parcelas (2 a {regra[1]}).", "erro")
             return
 
         novo = {
             "data": data_texto or date.today().strftime("%d/%m/%Y"),
-            "descricao": descricao,
             "categoria": categoria,
             "cartao": cartao,
             "valor": valor,
         }
-        self.gastos.append(novo)
-        salvar_dados(self.orcamentos, self.gastos)
+        if categoria in SUBCATEGORIAS:
+            novo["instituicao"] = self.inst_var.get()
+        novo["descricao"] = rotulo_categoria(novo)  # ex.: "Luz", "Fatura Nubank"
+        editando = self._editando is not None
+        if categoria in CATEGORIAS_PARCELADAS:
+            anterior = self.gastos[self._editando] if editando else {}
+            novo["parcelas"] = n_parcelas
+            novo["parcela"] = anterior.get("parcela", 1)
+            novo["compra"] = anterior.get("compra") or uuid.uuid4().hex[:12]
+            novo["descricao"] = descricao_parcela(novo)
+        if editando:
+            self.gastos[self._editando] = novo
+        else:
+            self.gastos.append(novo)
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
 
-        self.desc_var.set("")
-        self.valor_var.set("")
+        if editando:
+            self._cancelar_edicao()
+        else:
+            self.valor_var.set("")
 
         mes_novo = mes_do_gasto(novo) or self.mes_atual
         self.mes_atual = mes_novo
         self._sincronizar_mes()
-        self._toast(f"Gasto adicionado ({formatar_moeda(valor)}).", "sucesso")
+        acao = "alterado" if editando else "adicionado"
+        if categoria in CATEGORIAS_PARCELADAS and not editando:
+            self._toast(f"{categoria}: {novo['parcelas']}x de {formatar_moeda(valor)} "
+                        "adicionado. Use 'Copiar contas fixas' para lançar as "
+                        "próximas parcelas.", "sucesso")
+        else:
+            self._toast(f"Gasto {acao} ({formatar_moeda(valor)}).", "sucesso")
 
-    def remover_gasto(self):
-        selecionado = self.tree.selection()
-        if not selecionado:
+    def _selecionado(self):
+        """Índice (em self.gastos) da linha selecionada na tabela, ou None."""
+        selecao = self.tree.selection()
+        if not selecao:
+            return None
+        return int(self.tree.item(selecao[0], "tags")[-1].removeprefix("g_"))
+
+    def editar_lancamento(self):
+        """Carrega o gasto selecionado no formulário (ou cancela a edição)."""
+        if self._editando is not None:
+            self._cancelar_edicao()
+            return
+        indice = self._selecionado()
+        if indice is None:
+            self._toast("Selecione um gasto para editar.", "info")
+            return
+        item = self.gastos[indice]
+        self.valor_var.set(formatar_numero(item["valor"]))
+        self.data_var.set(item["data"])
+        self.cat_var.set(item["categoria"])
+        self.cartao_var.set(item.get("cartao", CARTAO_PADRAO))
+        if item.get("instituicao"):
+            self.inst_var.set(item["instituicao"])
+        if item.get("parcelas"):
+            self.parcelas_var.set(f"{item['parcelas']}x")
+            self._categoria_parcelas = item["categoria"]  # mantém a quantidade da parcela
+        self._mostrar_instituicao()
+        self.btn_add_gasto.configure(text="💾  Salvar alteração")
+        self._editando = indice
+        self.btn_editar.configure(text="✖  Cancelar edição")
+        self._toast("Altere os campos e clique em Salvar.", "info")
+
+    def _cancelar_edicao(self):
+        if self._editando is None:
+            return
+        self._editando = None
+        self.valor_var.set("")
+        self.data_var.set(date.today().strftime("%d/%m/%Y"))
+        self.btn_add_gasto.configure(text="➕  Adicionar gasto")
+        self.btn_editar.configure(text="✏️  Editar selecionado")
+
+    def limpar_lancamentos(self):
+        """Apaga todos os gastos do mês exibido (salário, rendas e outros meses ficam)."""
+        n_gastos = len(self.gastos_do_mes())
+        mes = nome_mes(self.mes_atual)
+        if not n_gastos:
+            self._toast(f"Não há gastos em {mes}.", "info")
+            return
+        if not self._confirmar(
+            "Limpar gastos do mês",
+            f"Apagar todos os {n_gastos} gasto(s) de {mes}? Não dá para desfazer.",
+        ):
+            return
+        self._cancelar_edicao()  # os índices mudam
+        self.gastos = [g for g in self.gastos if mes_do_gasto(g) != self.mes_atual]
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._atualizar_tudo()
+        self._toast(f"Gastos de {mes} apagados.", "sucesso")
+
+    def limpar_salario(self):
+        """Apaga o salário do mês exibido (rendas extras e gastos ficam)."""
+        salario = self.orcamento_do_mes()
+        mes = nome_mes(self.mes_atual)
+        if not salario:
+            self._toast(f"Não há salário salvo em {mes}.", "info")
+            return
+        if not self._confirmar(
+            "Limpar salário",
+            f"Apagar o salário de {mes} ({formatar_moeda(salario)})? Rendas extras "
+            f"e gastos continuam. Não dá para desfazer.",
+        ):
+            return
+        del self.orcamentos[self.mes_atual]
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._sincronizar_mes()
+        self._toast(f"Salário de {mes} apagado.", "sucesso")
+
+    def limpar_rendas(self):
+        """Apaga todas as rendas extras do mês exibido (salário e gastos ficam)."""
+        n_rendas = len(self.rendas_do_mes())
+        mes = nome_mes(self.mes_atual)
+        if not n_rendas:
+            self._toast(f"Não há rendas extras em {mes}.", "info")
+            return
+        if not self._confirmar(
+            "Limpar rendas extras",
+            f"Apagar as {n_rendas} renda(s) extra(s) de {mes}? Salário e gastos "
+            f"continuam. Não dá para desfazer.",
+        ):
+            return
+        self.rendas = [r for r in self.rendas if mes_do_gasto(r) != self.mes_atual]
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._preencher_renda()
+        self._atualizar_tudo()
+        self._toast(f"Rendas extras de {mes} apagadas.", "sucesso")
+
+    def remover_lancamento(self):
+        indice = self._selecionado()
+        if indice is None:
             self._toast("Selecione um gasto para remover.", "info")
             return
-        indice = int(self.tree.item(selecionado[0], "tags")[-1].split("_")[-1])
-        gasto = self.gastos[indice]
+        item = self.gastos[indice]
+        compra = item.get("compra")
+        parcelas = [g for g in self.gastos if compra and g.get("compra") == compra]
+        if len(parcelas) > 1:
+            self._remover_parcelas(indice, item, parcelas)
+            return
         if self._confirmar(
             "Remover gasto",
-            f"Remover '{gasto['descricao']}' ({formatar_moeda(gasto['valor'])})?",
+            f"Remover '{item['descricao']}' ({formatar_moeda(item['valor'])})?",
         ):
+            self._cancelar_edicao()  # os índices mudam depois do del
             del self.gastos[indice]
-            salvar_dados(self.orcamentos, self.gastos)
+            salvar_dados(self.orcamentos, self.gastos, self.rendas)
             self._atualizar_tudo()
             self._toast("Gasto removido.", "sucesso")
 
-    def _copiar_contas_fixas(self):
-        origens = [m for m in self.meses_disponiveis() if m != self.mes_atual]
-        if not origens:
-            self._toast("Não há outro mês com dados para copiar.", "info")
+    def _remover_parcelas(self, indice, item, parcelas):
+        """Parcela (compra ou empréstimo): remove só ela ou todas as parcelas."""
+        so_esta = "Só esta parcela"
+        todas = f"Todas as {len(parcelas)} parcelas"
+        total = sum(g["valor"] for g in parcelas)
+        escolha = self._escolher(
+            "Remover parcelas",
+            f"'{item['descricao']}' faz parte de um parcelamento "
+            f"({len(parcelas)} parcelas, {formatar_moeda(total)} no total). "
+            f"Uma parcela removida sozinha volta se você usar 'Copiar contas fixas'.",
+            [so_esta, todas])
+        if escolha is None:
             return
+        self._cancelar_edicao()  # os índices mudam
+        if escolha == todas:
+            self.gastos = [g for g in self.gastos if g.get("compra") != item["compra"]]
+            mensagem = f"{item['categoria']} removido ({len(parcelas)} parcelas)."
+        else:
+            del self.gastos[indice]
+            mensagem = "Parcela removida."
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._atualizar_tudo()
+        self._toast(mensagem, "sucesso")
+
+    def _copiar_contas_fixas(self):
+        parcelas = distribuir_parcelas(self.gastos)
+        if parcelas:
+            salvar_dados(self.orcamentos, self.gastos, self.rendas)
+            self._atualizar_tudo()
+            self._toast(f"{parcelas} parcela(s) de compras/empréstimos lançada(s) "
+                        "nos meses seguintes.", "sucesso")
+
+        def fixas(mes):
+            return [g for g in self.gastos if mes_do_gasto(g) == mes and e_conta_fixa(g)]
+
+        def chave(gasto):  # mesma regra de "já existe" de _executar_copia_contas
+            return gasto["descricao"].strip().lower(), rotulo_categoria(gasto)
+
+        meses_com_fixas = sorted({mes_do_gasto(g) for g in self.gastos
+                                  if e_conta_fixa(g)} - {None})
+        if not meses_com_fixas:
+            if not parcelas:
+                self._toast("Não há contas fixas lançadas para copiar.", "info")
+            return
+
+        # sugestão: copiar do mês anterior mais recente com contas para o mês atual
+        anteriores = [m for m in meses_com_fixas if m < self.mes_atual]
+        outros = [m for m in meses_com_fixas if m != self.mes_atual]
+        origem = (anteriores or outros or [self.mes_atual])[-1]
+        destino = self.mes_atual
+        if origem == destino:  # só o mês atual tem contas: sugere o próximo
+            destino = mes_de_data(somar_meses(f"01/{destino[5:]}/{destino[:4]}", 1))
+        estado = {"origem": origem, "destino": destino, "modo": "origem",
+                  "ano": int(origem[:4])}
 
         dlg = ctk.CTkToplevel(self.root)
         dlg.title("Copiar contas fixas")
-        dlg.geometry("440x230")
+        dlg.geometry("520x660")
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.after(50, dlg.grab_set)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
 
         ctk.CTkLabel(dlg, text="📋  Copiar contas fixas",
-                     font=self.ft_secao).pack(anchor="w", padx=20, pady=(20, 2))
-        ctk.CTkLabel(
-            dlg, text=("Copia " + ", ".join(CONTAS_FIXAS).lower()
-                       + f"\npara {nome_mes(self.mes_atual)} "
-                       "(sem duplicar o que já existe)."),
-            font=self.ft_pequena, text_color=SUB, justify="left",
-            wraplength=390).pack(anchor="w", padx=20, pady=(0, 12))
+                     font=self.ft_secao).pack(anchor="w", padx=20, pady=(18, 2))
+        ctk.CTkLabel(dlg, text="Escolha no calendário o mês de origem e o de destino. "
+                               "Contas que já existem no destino não são duplicadas.",
+                     font=self.ft_pequena, text_color=SUB, justify="left",
+                     wraplength=480).pack(anchor="w", padx=20, pady=(0, 10))
 
-        linha = ctk.CTkFrame(dlg, fg_color="transparent")
-        linha.pack(fill="x", padx=20)
-        ctk.CTkLabel(linha, text="Copiar do mês:", font=self.ft_bold).pack(
-            side="left", padx=(0, 8))
-        nomes = {nome_mes(m): m for m in origens}
-        var = tk.StringVar(value=list(nomes.keys())[0])
-        ctk.CTkOptionMenu(linha, variable=var, values=list(nomes.keys()),
-                          font=self.ft_normal, fg_color=CARD2,
-                          button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-                          text_color=TEXTO, width=200).pack(side="left")
+        modo = ctk.CTkSegmentedButton(
+            dlg, values=["Copiar de", "Copiar para"], font=self.ft_bold,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            command=lambda v: trocar_modo("origem" if v == "Copiar de" else "destino"))
+        modo.pack(fill="x", padx=20)
+
+        cabecalho = ctk.CTkFrame(dlg, fg_color="transparent")
+        cabecalho.pack(fill="x", padx=20, pady=(10, 4))
+        ctk.CTkButton(cabecalho, text="◀", width=36, font=self.ft_bold,
+                      fg_color="transparent", text_color=ACCENT, hover_color=CARD2,
+                      command=lambda: mudar_ano(-1)).pack(side="left")
+        ano_lbl = ctk.CTkLabel(cabecalho, text="", font=self.ft_secao)
+        ano_lbl.pack(side="left", expand=True)
+        ctk.CTkButton(cabecalho, text="▶", width=36, font=self.ft_bold,
+                      fg_color="transparent", text_color=ACCENT, hover_color=CARD2,
+                      command=lambda: mudar_ano(1)).pack(side="right")
+
+        grade = ctk.CTkFrame(dlg, fg_color="transparent")
+        grade.pack(padx=20)
+        legenda = ctk.CTkFrame(dlg, fg_color="transparent")
+        legenda.pack(fill="x", padx=20, pady=(4, 8))
+        for cor, texto in ((ACCENT, "origem"), (COR_RENDA, "destino")):
+            ctk.CTkLabel(legenda, text="●", text_color=cor, font=self.ft_bold).pack(
+                side="left", padx=(0, 3))
+            ctk.CTkLabel(legenda, text=texto, text_color=SUB,
+                         font=self.ft_pequena).pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(legenda, text="▢ mês atual   • tem contas fixas", text_color=SUB,
+                     font=self.ft_pequena).pack(side="left")
+
+        previa_titulo = ctk.CTkLabel(dlg, text="", font=self.ft_bold, anchor="w")
+        previa_titulo.pack(fill="x", padx=20)
+        previa = ctk.CTkScrollableFrame(dlg, height=120, fg_color=CARD2)
+        previa.pack(fill="x", padx=20, pady=(4, 6))
+        resumo = ctk.CTkLabel(dlg, text="", font=self.ft_normal, text_color=SUB,
+                              anchor="w", justify="left", wraplength=480)
+        resumo.pack(fill="x", padx=20)
 
         botoes = ctk.CTkFrame(dlg, fg_color="transparent")
-        botoes.pack(side="bottom", fill="x", padx=20, pady=18)
+        botoes.pack(side="bottom", fill="x", padx=20, pady=16)
+        btn_copiar = ctk.CTkButton(botoes, text="Copiar", fg_color=ACCENT,
+                                   hover_color=ACCENT_HOVER, font=self.ft_bold,
+                                   width=110, command=lambda: confirmar())
+        btn_copiar.pack(side="right", padx=(8, 0))
+        ctk.CTkButton(botoes, text="Cancelar", fg_color="transparent",
+                      border_width=1, border_color=BORDA, text_color=TEXTO,
+                      hover_color=CARD2, font=self.ft_bold, width=110,
+                      command=dlg.destroy).pack(side="right")
+
+        def trocar_modo(novo):
+            estado["modo"] = novo
+            modo.set("Copiar de" if novo == "origem" else "Copiar para")
+            desenhar()
+
+        def mudar_ano(delta):
+            estado["ano"] += delta
+            desenhar()
+
+        def escolher(mes):
+            estado[estado["modo"]] = mes
+            if estado["modo"] == "origem":  # próximo passo natural: o destino
+                trocar_modo("destino")
+            else:
+                desenhar()
+
+        def desenhar():
+            ano_lbl.configure(text=str(estado["ano"]))
+            for w in grade.winfo_children():
+                w.destroy()
+            hoje = mes_atual_chave()
+            for i, abrev in enumerate(MESES_ABREV):
+                mes = f"{estado['ano']:04d}-{i + 1:02d}"
+                n = len(fixas(mes))
+                if mes == estado["origem"]:
+                    fg, hover, txt = ACCENT, ACCENT_HOVER, "white"
+                elif mes == estado["destino"]:
+                    fg, hover, txt = COR_RENDA, COR_RENDA_HOVER, "white"
+                elif n:
+                    fg, hover, txt = CARD2, BORDA, ACCENT
+                else:
+                    fg, hover, txt = "transparent", CARD2, TEXTO
+                contas = f"{n} conta{'s' if n != 1 else ''} •" if n else "—"
+                linha, coluna = divmod(i, 4)
+                ctk.CTkButton(grade, text=f"{abrev.capitalize()}\n{contas}", width=108,
+                              height=48, font=self.ft_normal, fg_color=fg,
+                              hover_color=hover, text_color=txt,
+                              border_width=2 if mes == hoje else 0, border_color=SUB,
+                              command=lambda m=mes: escolher(m)).grid(
+                    row=linha, column=coluna, padx=4, pady=4)
+
+            origem, destino = estado["origem"], estado["destino"]
+            existentes = {chave(g) for g in fixas(destino)}
+            contas = fixas(origem)
+            novas = [g for g in contas if chave(g) not in existentes]
+            previa_titulo.configure(text=f"Contas fixas de {nome_mes(origem)}")
+            for w in previa.winfo_children():
+                w.destroy()
+            if not contas:
+                ctk.CTkLabel(previa, text="Nenhuma conta fixa neste mês.",
+                             text_color=SUB, font=self.ft_pequena).pack(anchor="w")
+            for g in contas:
+                repetida = chave(g) not in {chave(x) for x in novas}
+                ctk.CTkLabel(
+                    previa, anchor="w", font=self.ft_pequena,
+                    text_color=SUB if repetida else TEXTO,
+                    text=(f"{rotulo_categoria(g)}  ·  dia {dia_de_data(g['data']):02d}  ·  "
+                          f"{formatar_moeda(g['valor'])}"
+                          + ("   (já existe no destino)" if repetida else ""))).pack(
+                    fill="x", anchor="w")
+            if origem == destino:
+                resumo.configure(text="Escolha meses diferentes para origem e destino.")
+            elif not novas:
+                resumo.configure(text=f"Nada novo para copiar para {nome_mes(destino)}.")
+            else:
+                total = sum(g["valor"] for g in novas)
+                resumo.configure(
+                    text=f"Copiar {len(novas)} conta(s) ({formatar_moeda(total)}) de "
+                         f"{nome_mes(origem)} → {nome_mes(destino)}.")
+            btn_copiar.configure(state="normal" if novas and origem != destino
+                                 else "disabled")
 
         def confirmar():
-            origem = nomes[var.get()]
-            copiadas = self._executar_copia_contas(origem, self.mes_atual)
+            origem, destino = estado["origem"], estado["destino"]
+            copiadas = self._executar_copia_contas(origem, destino)
             dlg.destroy()
+            self.mes_atual = destino  # mostra o resultado
+            self._sincronizar_mes()
             if copiadas:
-                self._toast(
-                    f"{copiadas} conta(s) copiada(s) de {nome_mes(origem)}.",
-                    "sucesso")
+                self._toast(f"{copiadas} conta(s) copiada(s) de {nome_mes(origem)} "
+                            f"para {nome_mes(destino)}.", "sucesso")
             else:
                 self._toast("Nenhuma conta nova para copiar.", "info")
 
-        ctk.CTkButton(botoes, text="Copiar", fg_color=ACCENT,
-                      hover_color=ACCENT_HOVER, font=self.ft_bold, width=110,
-                      command=confirmar).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(botoes, text="Cancelar", fg_color="transparent",
-                      border_width=1, border_color=BORDA,
-                      text_color=TEXTO, hover_color=CARD2,
-                      font=self.ft_bold, width=110,
-                      command=dlg.destroy).pack(side="right")
+        trocar_modo("origem")
 
     def _executar_copia_contas(self, origem, destino):
         existentes = {
-            (g["descricao"].strip().lower(), g["categoria"])
+            (g["descricao"].strip().lower(), rotulo_categoria(g))
             for g in self.gastos if mes_do_gasto(g) == destino
         }
         ano, mes = (int(x) for x in destino.split("-"))
@@ -988,24 +2081,27 @@ class CalculadorApp:
         for gasto in list(self.gastos):
             if mes_do_gasto(gasto) != origem:
                 continue
-            if gasto["categoria"] not in CONTAS_FIXAS:
+            if not e_conta_fixa(gasto):
                 continue
-            chave = (gasto["descricao"].strip().lower(), gasto["categoria"])
+            chave = (gasto["descricao"].strip().lower(), rotulo_categoria(gasto))
             if chave in existentes:
                 continue
             dia = min(dia_de_data(gasto.get("data", "")), ultimo_dia)
-            self.gastos.append({
+            copia = {
                 "data": f"{dia:02d}/{mes:02d}/{ano:04d}",
                 "descricao": gasto["descricao"],
                 "categoria": gasto["categoria"],
                 "cartao": gasto.get("cartao", CARTAO_PADRAO),
                 "valor": gasto["valor"],
-            })
+            }
+            if "instituicao" in gasto:
+                copia["instituicao"] = gasto["instituicao"]
+            self.gastos.append(copia)
             existentes.add(chave)
             copiadas += 1
 
         if copiadas:
-            salvar_dados(self.orcamentos, self.gastos)
+            salvar_dados(self.orcamentos, self.gastos, self.rendas)
             self._sincronizar_mes()
         return copiadas
 
@@ -1022,6 +2118,7 @@ class CalculadorApp:
 
         filtro = self.filtro_var.get()
         filtro_cartao = self.filtro_cartao_var.get()
+
         posicao = 0
         for indice, gasto in enumerate(self.gastos):
             if mes_do_gasto(gasto) != self.mes_atual:
@@ -1036,35 +2133,54 @@ class CalculadorApp:
                 "", "end",
                 values=(
                     gasto["data"],
-                    gasto["descricao"],
-                    gasto["categoria"],
+                    descricao_parcela(gasto) if gasto.get("compra")
+                    else rotulo_categoria(gasto),
                     cartao,
                     formatar_moeda(gasto["valor"]),
                 ),
-                tags=(zebra, f"idx_{indice}"),
+                tags=(zebra, f"g_{indice}"),
             )
             posicao += 1
 
-        orcamento = self.orcamento_do_mes()
+        salario = self.orcamento_do_mes()
+        por_app, outras_rendas = totais_renda(self.rendas_do_mes())
+        orcamento = salario + outras_rendas + sum(por_app.values())
         total_geral = sum(g["valor"] for g in self.gastos_do_mes())
         restante = orcamento - total_geral
 
+        self.card_salario_valor.configure(text=formatar_moeda(salario))
+        self.card_renda_valor.configure(text=formatar_moeda(outras_rendas))
+        self._atualizar_cards_apps(por_app)
         self.card_orc_valor.configure(text=formatar_moeda(orcamento))
         self.card_gasto_valor.configure(text=formatar_moeda(total_geral))
         self.card_rest_valor.configure(text=formatar_moeda(restante))
         if restante >= 0:
             self.card_rest_valor.configure(text_color=COR_POS)
-            self.card_rest_icone.configure(text="🟢")
             self.card_rest_titulo.configure(text="RESTANTE")
         else:
             self.card_rest_valor.configure(text_color=COR_NEG)
-            self.card_rest_icone.configure(text="🔴")
             self.card_rest_titulo.configure(text="ESTOUROU")
 
+    def _atualizar_cards_apps(self, por_app):
+        """Um card por app com renda no mês, quebrando linha a cada COLUNAS_ENTRADAS."""
+        apps = tuple(app for app, valor in por_app.items() if valor > 0)
+        if apps != self._apps_nos_cards:
+            for rotulo in self.card_app_valor.values():
+                rotulo.master.destroy()
+            self.card_app_valor = {}
+            for n, app in enumerate(apps, start=2):  # 0 e 1: salário e rendas
+                linha, coluna = divmod(n, COLUNAS_ENTRADAS)
+                self.card_app_valor[app] = self._criar_card(
+                    self.entradas, coluna, "🛵", app.upper(), COR_RENDA,
+                    compacto=True, logo=self._logos_cards[app], linha=linha)
+            self._apps_nos_cards = apps
+        for app, rotulo in self.card_app_valor.items():
+            rotulo.configure(text=formatar_moeda(por_app[app]))
+
     def _atualizar_progresso(self):
-        orcamento = self.orcamento_do_mes()
+        disponivel = self.disponivel_do_mes()
         total_gasto = sum(g["valor"] for g in self.gastos_do_mes())
-        pct = (total_gasto / orcamento * 100) if orcamento > 0 else 0
+        pct = (total_gasto / disponivel * 100) if disponivel > 0 else 0
         self.prog_bar.set(min(pct, 100) / 100)
         self.prog_bar.configure(progress_color=_cor_progresso(pct))
         self.prog_label.configure(text=f"{pct:.0f}% usado",
@@ -1088,50 +2204,67 @@ class CalculadorApp:
         # ---- rosca (donut): gastos por categoria ----
         self._preparar_ax(self.fig_pizza, self.ax_pizza)
         self.ax_pizza.clear()
+        self.ax_pizza.set_title("Gastos por categoria", fontsize=13,
+                                fontweight="bold", color=texto, pad=10)
         if totais:
             labels = list(totais.keys())
             valores = list(totais.values())
-            cores = [CATEGORIA_CORES.get(l, "#94A3B8") for l in labels]
+            cores = [cor_categoria(l) for l in labels]
             total = sum(valores)
-            wedges, _t, _a = self.ax_pizza.pie(
+            restante = self.disponivel_do_mes() - total
+            if restante > 0:
+                labels.append("Restante")
+                valores.append(restante)
+                cores.append(COR_RESTANTE)
+            wedges, _t, pcts = self.ax_pizza.pie(
                 valores, colors=cores, startangle=90, counterclock=False,
                 autopct=lambda p: f"{p:.0f}%" if p >= 7 else "",
-                pctdistance=0.78,
+                pctdistance=0.79,
                 wedgeprops={"width": 0.42, "edgecolor": card, "linewidth": 2},
-                textprops={"fontsize": 8, "color": "white", "fontweight": "bold"},
+                textprops={"fontsize": 9, "color": "white", "fontweight": "bold"},
             )
-            self.ax_pizza.text(0, 0, f"Total\n{formatar_moeda(total)}",
-                               ha="center", va="center", fontsize=9.5,
+            self.ax_pizza.text(0, 0, f"Gasto\n{formatar_moeda(total)}",
+                               ha="center", va="center", fontsize=11,
                                fontweight="bold", color=texto)
-            self.ax_pizza.legend(wedges, labels, loc="upper center",
-                                 bbox_to_anchor=(0.5, 0.02), ncol=3, frameon=False,
-                                 fontsize=7.5, handlelength=1, columnspacing=1,
-                                 labelcolor=texto)
+            legenda_com_logos(self.ax_pizza, wedges, labels, altura=2.2, fundo=card,
+                              loc="center left", bbox_to_anchor=(1.02, 0.5),
+                              ncol=-(-len(labels) // 9), frameon=False,
+                              fontsize=8.5, handlelength=1, columnspacing=1,
+                              labelcolor=texto)
+            logos = [logo_da_fatia(l) for l in labels]
+            for i in imagens_nas_fatias(self.ax_pizza, wedges, logos):
+                # o logo ocupa o meio da fatia: a porcentagem vai para fora do anel
+                angulo = np.deg2rad((wedges[i].theta1 + wedges[i].theta2) / 2)
+                x, y = np.cos(angulo), np.sin(angulo)
+                pcts[i].set_position((1.16 * x, 1.16 * y))
+                pcts[i].set_color(texto)
+                pcts[i].set_ha("left" if x > 0.2 else "right" if x < -0.2 else "center")
         else:
             self.ax_pizza.text(0.5, 0.5, "Sem gastos ainda", ha="center",
                                va="center", color=sub, fontsize=10)
             self.ax_pizza.axis("off")
-        self.ax_pizza.set_title("Gastos por categoria", fontsize=12,
-                                fontweight="bold", color=texto, pad=10)
         self.canvas_pizza.draw()
 
         # ---- barras: orçamento x gasto x restante ----
         self._preparar_ax(self.fig_barras, self.ax_barras)
+        renda = self.renda_do_mes()
         total_gasto = sum(g["valor"] for g in gastos_mes)
-        restante = orcamento - total_gasto
+        restante = orcamento + renda - total_gasto
         self.ax_barras.clear()
-        itens = ["Orçamento", "Gasto", "Restante"]
-        valores = [orcamento, total_gasto, restante]
-        cores = [COR_ORC, COR_GASTO, COR_POS if restante >= 0 else COR_NEG]
+        itens = ["Salário", "Rendas", "Gasto", "Restante"]
+        valores = [orcamento, renda, total_gasto, restante]
+        cores = [COR_ORC, COR_RENDA, COR_GASTO,
+                 COR_RESTANTE if restante >= 0 else COR_NEG]
         barras = self.ax_barras.bar(itens, valores, color=cores, width=0.62,
                                     zorder=3)
-        self.ax_barras.set_title("Orçamento x Gasto x Restante", fontsize=12,
-                                 fontweight="bold", color=texto, pad=10)
+        self.ax_barras.set_title("Salário, rendas, gasto e restante",
+                                 fontsize=10.5, fontweight="bold", color=texto,
+                                 pad=8)
         for lado in ("top", "right", "left"):
             self.ax_barras.spines[lado].set_visible(False)
         self.ax_barras.spines["bottom"].set_color(_cor(BORDA))
         self.ax_barras.tick_params(left=False, labelleft=False, bottom=False)
-        self.ax_barras.tick_params(axis="x", labelsize=9.5, colors=texto)
+        self.ax_barras.tick_params(axis="x", labelsize=8.5, colors=texto)
         self.ax_barras.yaxis.grid(True, color=grid, zorder=0)
         maximo = max(valores + [1])
         minimo = min(valores + [0])
@@ -1142,36 +2275,32 @@ class CalculadorApp:
                 xy=(barra.get_x() + barra.get_width() / 2, valor),
                 xytext=(0, 4 if valor >= 0 else -4), textcoords="offset points",
                 ha="center", va="bottom" if valor >= 0 else "top",
-                fontsize=8.5, fontweight="bold", color=texto)
+                fontsize=7.5, fontweight="bold", color=texto)
         self.canvas_barras.draw()
 
-        # ---- barras horizontais: gastos por cartão ----
+        # ---- rosca pequena: formas de pagamento, com emojis ----
         self._preparar_ax(self.fig_cartao, self.ax_cartao)
         self.ax_cartao.clear()
         cartoes = totais_por_cartao(gastos_mes)
-        self.ax_cartao.set_title("Gastos por cartão / forma de pagamento",
-                                 fontsize=12, fontweight="bold", color=texto,
-                                 pad=10)
-        for lado in ("top", "right", "bottom"):
-            self.ax_cartao.spines[lado].set_visible(False)
-        self.ax_cartao.spines["left"].set_color(_cor(BORDA))
-        self.ax_cartao.tick_params(bottom=False, labelbottom=False, left=False)
-        self.ax_cartao.tick_params(axis="y", labelsize=9.5, colors=texto)
-        self.ax_cartao.xaxis.grid(True, color=grid, zorder=0)
+        self.ax_cartao.set_title("Formas de pagamento", fontsize=10.5,
+                                 fontweight="bold", color=texto, pad=8)
         if cartoes:
-            ordenado = sorted(cartoes.items(), key=lambda x: x[1])
-            nomes = [n for n, _ in ordenado]
-            vals = [v for _, v in ordenado]
-            cores = [CARTAO_CORES.get(n, "#94A3B8") for n in nomes]
-            barrash = self.ax_cartao.barh(nomes, vals, color=cores, zorder=3,
-                                          height=0.6)
-            self.ax_cartao.set_xlim(0, max(vals) * 1.20)
-            for barra, valor in zip(barrash, vals):
-                self.ax_cartao.annotate(
-                    formatar_moeda(valor),
-                    xy=(valor, barra.get_y() + barra.get_height() / 2),
-                    xytext=(5, 0), textcoords="offset points", ha="left",
-                    va="center", fontsize=8.5, fontweight="bold", color=texto)
+            nomes = sorted(cartoes, key=cartoes.get, reverse=True)
+            vals = [cartoes[n] for n in nomes]
+            wedges, _t = self.ax_cartao.pie(
+                vals, colors=[CARTAO_CORES.get(n, "#94A3B8") for n in nomes],
+                startangle=90, counterclock=False,
+                wedgeprops={"width": 0.5, "edgecolor": card, "linewidth": 2})
+            emojis = [imagem_emoji(CARTAO_EMOJI.get(n, "🧾")) for n in nomes]
+            rotulos = [f"{n}  {formatar_moeda(v)}" for n, v in zip(nomes, vals)]
+            legenda_com_logos(self.ax_cartao, wedges, rotulos,
+                              imagem_de=dict(zip(rotulos, emojis)).get, altura=1.9,
+
+                              loc="center left", bbox_to_anchor=(1.0, 0.5),
+                              frameon=False, fontsize=8, handlelength=1,
+                              labelcolor=texto)
+            imagens_nas_fatias(self.ax_cartao, wedges, emojis, largura=0.5,
+                               altura_pts=17)
         else:
             self.ax_cartao.text(0.5, 0.5, "Sem gastos ainda", ha="center",
                                 va="center", color=sub, fontsize=10)
@@ -1225,7 +2354,9 @@ class CalculadorApp:
         self.ax_evol.yaxis.grid(True, color=grid, zorder=0)
         if meses:
             gasto_mes = [sum(por_mes[m].values()) for m in meses]
-            orc_mes = [self.orcamentos.get(m, 0.0) for m in meses]
+            orc_mes = [self.orcamentos.get(m, 0.0) + sum(
+                r["valor"] for r in self.rendas if mes_do_gasto(r) == m)
+                for m in meses]
             x = list(range(len(meses)))
             self.ax_evol.bar(x, gasto_mes, color=COR_GASTO, width=0.6, zorder=3,
                              label="Gasto")
@@ -1270,16 +2401,28 @@ class CalculadorApp:
             for cat in categorias:
                 vals = [por_mes[m].get(cat, 0.0) for m in meses]
                 self.ax_comp.bar(x, vals, bottom=base, width=0.6,
-                                 color=CATEGORIA_CORES.get(cat, "#94A3B8"),
+                                 color=cor_categoria(cat),
                                  label=cat, zorder=3)
                 base = [b + v for b, v in zip(base, vals)]
+            restantes = [
+                max(self.orcamentos.get(m, 0.0) + sum(
+                    r["valor"] for r in self.rendas if mes_do_gasto(r) == m) - b, 0.0)
+                for m, b in zip(meses, base)
+            ]
+            if any(restantes):
+                self.ax_comp.bar(x, restantes, bottom=base, width=0.6,
+                                 color=COR_RESTANTE, label="Restante",
+                                 zorder=3)
+                base = [b + v for b, v in zip(base, restantes)]
             self.ax_comp.set_xticks(x)
             self.ax_comp.set_xticklabels(labels)
             self.ax_comp.set_ylim(0, max(base + [1]) * 1.10)
-            ncol = min(len(categorias), 5)
-            self.ax_comp.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16),
-                                ncol=ncol, frameon=False, fontsize=7.5,
-                                handlelength=1, columnspacing=1, labelcolor=texto)
+            handles, nomes = self.ax_comp.get_legend_handles_labels()
+            legenda_com_logos(self.ax_comp, handles, nomes, fundo=_cor(CARD),
+                              loc="center left", bbox_to_anchor=(1.01, 0.5),
+                              ncol=-(-len(nomes) // 7), frameon=False,
+                              fontsize=7.5,
+                              handlelength=1, columnspacing=1, labelcolor=texto)
         else:
             self.ax_comp.text(0.5, 0.5, "Sem dados para comparar", ha="center",
                               va="center", color=sub, fontsize=10)
