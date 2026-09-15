@@ -89,23 +89,41 @@ python calculador.py
 
 ---
 
-## 💻 Aplicativo para Windows
+## 💻 Aplicativos para Windows e Ubuntu
 
-Não precisa instalar Python: o GitHub gera o aplicativo automaticamente
-(workflow `.github/workflows/windows.yml`) a cada push na `main`.
-
-1. No GitHub, abra **Actions → App Windows** e clique na execução mais recente.
-2. Em **Artifacts**, baixe **CalculadorDeGastos-windows** e extraia o `.zip`.
-3. Abra `CalculadorDeGastos\CalculadorDeGastos.exe`.
+Não precisa instalar Python: o GitHub gera os aplicativos automaticamente
+(workflow `.github/workflows/aplicativos.yml`) a cada push na `main`.
+No GitHub, abra **Actions → Aplicativos**, clique na execução mais recente e,
+em **Artifacts**, baixe o arquivo do seu sistema.
 
 Para publicar uma versão com download direto na página **Releases**, crie uma
 tag: `git tag v1.0 && git push origin v1.0`.
 
-No aplicativo, os dados ficam em `%APPDATA%\CalculadorGastos\gastos.json` e os
-logos em `%APPDATA%\CalculadorGastos\logos\` (cole essa pasta na barra de
-endereço do Explorador de Arquivos para abrir). Na primeira vez, o Windows
-SmartScreen pode avisar que o app não é reconhecido: clique em
+### Windows
+
+1. Baixe **CalculadorDeGastos-windows.zip** e extraia.
+2. Abra `CalculadorDeGastos\CalculadorDeGastos.exe`.
+
+Os dados ficam em `%APPDATA%\CalculadorGastos\gastos.json` e os logos em
+`%APPDATA%\CalculadorGastos\logos\` (cole essa pasta na barra de endereço do
+Explorador de Arquivos para abrir). Na primeira vez, o Windows SmartScreen pode
+avisar que o app não é reconhecido: clique em
 **Mais informações → Executar assim mesmo**.
+
+### Ubuntu
+
+```bash
+tar -xzf CalculadorDeGastos-ubuntu.tar.gz
+./instalar-ubuntu.sh            # instala para o seu usuário, sem sudo
+./instalar-ubuntu.sh --remover  # remove (seus dados continuam)
+```
+
+Depois procure por **Calculador de Gastos** nos aplicativos. Os dados ficam em
+`~/.local/share/CalculadorGastos/gastos.json` e os logos em
+`~/.local/share/CalculadorGastos/logos/`.
+
+> Rodando pelo código (`python calculador.py`), os dados continuam na pasta do
+> projeto — são arquivos separados dos do aplicativo instalado.
 
 ---
 
@@ -115,10 +133,12 @@ SmartScreen pode avisar que o app não é reconhecido: clique em
 calculador-gastos/
 ├── calculador.py          # Aplicação (interface + lógica + gráficos)
 ├── test_calculador.py     # Checagens da camada de dados (JSON)
+├── empacotamento/         # instalar-ubuntu.sh (atalho no menu do Ubuntu)
+├── .github/workflows/     # gera os aplicativos Windows e Ubuntu
 ├── requirements.txt       # Dependências do projeto
 ├── gastos.exemplo.json    # Dados fictícios de exemplo
 ├── gastos.json            # Seus dados reais (gerado no 1º uso, fora do Git)
-├── assets/                # Imagens do README (screenshots)
+├── assets/                # Ícone do app, logos (fora do Git) e imagens do README
 ├── .gitignore
 ├── LICENSE
 └── README.md

@@ -49,8 +49,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if getattr(sys, "frozen", False):
     # executável (PyInstaller): a pasta do programa pode ser temporária ou sem
     # permissão de escrita, então dados e logos ficam na pasta do usuário
-    PASTA_DADOS = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
-                               "CalculadorGastos")
+    # Windows: %APPDATA%; Linux: ~/.local/share (padrão XDG)
+    PASTA_DADOS = os.path.join(
+        os.environ.get("APPDATA") or os.environ.get("XDG_DATA_HOME")
+        or os.path.join(os.path.expanduser("~"), ".local", "share"), "CalculadorGastos")
     LOGOS_DIR = os.path.join(PASTA_DADOS, "logos")  # nubank.png, itau.png...
     os.makedirs(LOGOS_DIR, exist_ok=True)
 else:
@@ -58,6 +60,7 @@ else:
     PASTA_DADOS = BASE_DIR
     LOGOS_DIR = os.path.join(BASE_DIR, "assets", "logos")
 DATA_FILE = os.path.join(PASTA_DADOS, "gastos.json")
+ICONE = os.path.join(BASE_DIR, "assets", "icone.png")  # vai junto no executável
 
 CATEGORIAS = [
     "Alimentação",
@@ -2443,7 +2446,9 @@ class CalculadorApp:
 def main():
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("blue")
-    root = ctk.CTk()
+    # className vira o WM_CLASS da janela: liga a janela ao atalho do menu (Linux)
+    root = ctk.CTk(className="calculador-gastos")
+    root.iconphoto(True, tk.PhotoImage(file=ICONE))
     CalculadorApp(root)
     root.mainloop()
 
