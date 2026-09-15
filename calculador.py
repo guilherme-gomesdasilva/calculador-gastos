@@ -18,6 +18,7 @@ Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
     .venv/bin/python calculador.py
 """
 
+import bisect
 import calendar
 import itertools
 import json
@@ -122,7 +123,6 @@ POUPANCAS = {
 # Compras parceladas: cada parcela é um gasto no seu mês (ver distribuir_parcelas)
 CATEGORIA_PARCELAMENTO = "Parcelamento de Compras"
 OUTRA_QUANTIDADE = "Outra…"
-TEXTO_SOBRE = {"#F9A8D4": "#1F2430"}  # cor clara (rosa do parcelamento): texto escuro
 # categoria parcelada -> (quantidades rápidas no menu, máximo aceito em "Outra…")
 CATEGORIAS_PARCELADAS = {
     CATEGORIA_PARCELAMENTO: ([f"{n}x" for n in (2, 3, 4, 5, 6, 10, 12)], 48),
@@ -455,12 +455,6 @@ def imagem_logo(nome):
     return None
 
 
-def carregar_logo(instituicao):
-    """Logo como array para o matplotlib, ou None."""
-    img = imagem_logo(instituicao)
-    return None if img is None else np.asarray(img)
-
-
 def logo_ctk(nome, altura):
     """Logo para a interface, sem fundo: uma versão legível para cada tema, ou None."""
     img = imagem_logo(nome)
@@ -470,13 +464,6 @@ def logo_ctk(nome, altura):
     claro, escuro = (Image.fromarray(logo_sobre_cor(arr, cor)) for cor in CARD)
     return ctk.CTkImage(light_image=claro, dark_image=escuro,
                         size=(round(img.width * altura / img.height), altura))
-
-
-def rotulo_renda(renda):
-    """Como a renda aparece na tabela: 'Freelance', 'Delivery - iFood'..."""
-    if renda.get("app"):
-        return f"Delivery - {renda['app']}"
-    return renda.get("fonte", FONTE_PADRAO)
 
 
 def mesma_renda(renda, mes, fonte, app=None):
@@ -541,8 +528,8 @@ def imagem_emoji(emoji):
 
 def logo_do_rotulo(rotulo):
     """Logo do banco de um rótulo 'Fatura <banco>', ou None."""
-    inst = instituicao_do_rotulo(rotulo)
-    return carregar_logo(inst) if inst else None
+    img = imagem_logo(inst) if (inst := instituicao_do_rotulo(rotulo)) else None
+    return None if img is None else np.asarray(img)
 
 
 def _lab(rgb):
@@ -564,8 +551,8 @@ def _luminancia(rgb):
 def logo_sobre_cor(logo, cor):
     """Logo legível sobre `cor` (sem mexer nele se já estiver legível).
 
-    1. Fundo escuro: as partes escuras do logo viram brancas e as coloridas
-       ficam (ex.: texto do inDrive/Amazon no tema escuro, 'nu' na fatia roxa).
+    1. Fundo escuro e logo sem fundo próprio: as partes escuras viram brancas e
+       as coloridas ficam (ex.: texto do inDrive/Amazon no tema escuro).
     2. Se a maior parte do logo ainda tem a mesma cor do fundo (ex.: Inter
        laranja na fatia laranja), ele todo vira silhueta branca ou preta.
     """
@@ -575,7 +562,8 @@ def logo_sobre_cor(logo, cor):
     fundo = np.array([to_rgb(cor)])
     luminancia = float(_luminancia(fundo)[0])
     resultado = logo
-    if luminancia < 0.2:
+    # ícone com fundo próprio (quase todo opaco, ex.: 99, Keeta) já tem contraste
+    if luminancia < 0.2 and visivel.mean() < 0.75:
         lum = _luminancia(logo[..., :3].reshape(-1, 3) / 255).reshape(visivel.shape)
         contraste = (np.maximum(lum, luminancia) + 0.05) / (np.minimum(lum, luminancia) + 0.05)
         apagadas = visivel & (contraste < 1.5)
@@ -1472,7 +1460,9 @@ class CalculadorApp:
         if parcelado:  # destaque: aqui se escolhe o começo do parcelamento
             cor = CATEGORIA_CORES.get(self.cat_var.get(), ACCENT)
             self.btn_data.configure(text="📅  Início", width=96, fg_color=cor,
-                                    hover_color=cor, text_color=TEXTO_SOBRE.get(cor, "white"))
+                                    hover_color=cor,  # rosa claro pede texto escuro
+                                    text_color="#1F2430" if cor == CATEGORIA_CORES[
+                                        CATEGORIA_PARCELAMENTO] else "white")
         else:
             self.btn_data.configure(text="📅", width=36, fg_color=CARD, hover_color=BORDA,
                                     text_color=TEXTO)
@@ -1514,8 +1504,9 @@ class CalculadorApp:
             self._ultima_parcela = valor
             return
         maximo = regra[1]
-        texto = self._pedir_texto("Quantidade de parcelas",
-                                  f"Digite a quantidade de parcelas (2 a {maximo}):")
+        texto = ctk.CTkInputDialog(
+            title="Quantidade de parcelas",
+            text=f"Digite a quantidade de parcelas (2 a {maximo}):").get_input()
         n = quantidade_parcelas(texto, maximo)
         if n is None:
             if texto is not None:
@@ -1524,10 +1515,6 @@ class CalculadorApp:
         else:
             self.parcelas_var.set(f"{n}x")
         self._mostrar_instituicao()
-
-    def _pedir_texto(self, titulo, pergunta):
-        """Caixa para digitar; retorna o texto ou None se cancelar."""
-        return ctk.CTkInputDialog(title=titulo, text=pergunta).get_input()
 
     def _escolher_mes_da_data(self):
         """📅: escolhe mês/ano no calendário, mantendo o dia digitado."""
@@ -1634,11 +1621,7 @@ class CalculadorApp:
         """Redesenha os gráficos do mês logo após a janela/aba mudar de tamanho."""
         if self._redesenho:
             self.root.after_cancel(self._redesenho)
-        self._redesenho = self.root.after(150, self._redesenhar_graficos)
-
-    def _redesenhar_graficos(self):
-        self._redesenho = None
-        self._atualizar_graficos()
+        self._redesenho = self.root.after(150, self._atualizar_graficos)
 
     def _criar_canvas_grafico(self, parent, linha, coluna, columnspan=1, rowspan=1):
         moldura = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
@@ -1769,7 +1752,6 @@ class CalculadorApp:
             nova = {"data": self._data_no_mes(), "fonte": fonte, "valor": valor}
             if app:
                 nova["app"] = app
-            nova["descricao"] = rotulo_renda(nova)
             self.rendas.append(nova)
         salvar_dados(self.orcamentos, self.gastos, self.rendas)
         self._preencher_renda()
@@ -2198,20 +2180,30 @@ class CalculadorApp:
         self._atualizar_evolucao()
         self._atualizar_poupancas()
 
+    def _estilizar_eixo(self, fig, ax, titulo, tamanho=12, rotulos=9, pad=10):
+        """Limpa o eixo e aplica o estilo dos gráficos de barras/linhas do app."""
+        self._preparar_ax(fig, ax)
+        ax.clear()
+        ax.set_title(titulo, fontsize=tamanho, fontweight="bold", color=_cor(TEXTO),
+                     pad=pad)
+        for lado in ("top", "right", "left"):
+            ax.spines[lado].set_visible(False)
+        ax.spines["bottom"].set_color(_cor(BORDA))
+        ax.tick_params(left=False, labelleft=False, bottom=False)
+        ax.tick_params(axis="x", labelsize=rotulos, colors=_cor(TEXTO))
+        ax.yaxis.grid(True, color=_cor(GRID), zorder=0)
+
     def _atualizar_poupancas(self):
         meses, saldo, movimento = acumulado_poupancas(self.gastos, self.rendas,
                                                       ate=self.mes_atual)
-        texto, sub, grid = _cor(TEXTO), _cor(SUB), _cor(GRID)
+        texto, sub = _cor(TEXTO), _cor(SUB)
         nomes = {"reserva": "Reserva de Emergência", "investimentos": "Investimentos"}
 
         # ---- resumo no mês exibido ----
-        i = next((k for k, m in enumerate(meses) if m == self.mes_atual), None)
-        antes = [k for k, m in enumerate(meses) if m < self.mes_atual]
-        indice = i if i is not None else (antes[-1] if antes else None)
-        def no_mes(serie):
-            return serie[indice] if indice is not None else 0.0
-        reserva, invest = no_mes(saldo["reserva"]), no_mes(saldo["investimentos"])
-        mov_mes = {n: movimento[n][i] if i is not None else 0.0 for n in POUPANCAS}
+        k = bisect.bisect_right(meses, self.mes_atual) - 1  # último mês até o exibido
+        reserva, invest = (saldo[n][k] if k >= 0 else 0.0 for n in POUPANCAS)
+        no_mes = k >= 0 and meses[k] == self.mes_atual
+        mov_mes = {n: movimento[n][k] if no_mes else 0.0 for n in POUPANCAS}
         guardado = sum(mov_mes.values())
         # quantos meses de gastos a reserva cobre (sem contar o que foi guardado)
         categorias_poupanca = {cat for cat, _ in POUPANCAS.values()}
@@ -2234,15 +2226,7 @@ class CalculadorApp:
             legenda.configure(text=texto_legenda)
 
         def estilizar(fig, ax, titulo):
-            self._preparar_ax(fig, ax)
-            ax.clear()
-            ax.set_title(titulo, fontsize=12, fontweight="bold", color=texto, pad=10)
-            for lado in ("top", "right", "left"):
-                ax.spines[lado].set_visible(False)
-            ax.spines["bottom"].set_color(_cor(BORDA))
-            ax.tick_params(left=False, labelleft=False, bottom=False)
-            ax.tick_params(axis="x", labelsize=9, colors=texto)
-            ax.yaxis.grid(True, color=grid, zorder=0)
+            self._estilizar_eixo(fig, ax, titulo)
             if not meses:
                 ax.text(0.5, 0.5, "Lance gastos nas categorias Reserva de Emergência ou "
                         "Investimentos para acompanhar aqui", ha="center", va="center",
@@ -2375,7 +2359,6 @@ class CalculadorApp:
         totais = totais_por_categoria(gastos_mes)
         texto = _cor(TEXTO)
         sub = _cor(SUB)
-        grid = _cor(GRID)
         card = _cor(CARD)
 
         # ---- rosca (donut): gastos por categoria ----
@@ -2423,26 +2406,18 @@ class CalculadorApp:
         self.canvas_pizza.draw()
 
         # ---- barras: orçamento x gasto x restante ----
-        self._preparar_ax(self.fig_barras, self.ax_barras)
         renda = self.renda_do_mes()
         total_gasto = sum(g["valor"] for g in gastos_mes)
         restante = orcamento + renda - total_gasto
-        self.ax_barras.clear()
+        self._estilizar_eixo(self.fig_barras, self.ax_barras,
+                             "Salário, rendas, gasto e restante",
+                             tamanho=10.5, rotulos=8.5, pad=8)
         itens = ["Salário", "Rendas", "Gasto", "Restante"]
         valores = [orcamento, renda, total_gasto, restante]
         cores = [COR_ORC, COR_RENDA, COR_GASTO,
                  COR_RESTANTE if restante >= 0 else COR_NEG]
         barras = self.ax_barras.bar(itens, valores, color=cores, width=0.62,
                                     zorder=3)
-        self.ax_barras.set_title("Salário, rendas, gasto e restante",
-                                 fontsize=10.5, fontweight="bold", color=texto,
-                                 pad=8)
-        for lado in ("top", "right", "left"):
-            self.ax_barras.spines[lado].set_visible(False)
-        self.ax_barras.spines["bottom"].set_color(_cor(BORDA))
-        self.ax_barras.tick_params(left=False, labelleft=False, bottom=False)
-        self.ax_barras.tick_params(axis="x", labelsize=8.5, colors=texto)
-        self.ax_barras.yaxis.grid(True, color=grid, zorder=0)
         maximo = max(valores + [1])
         minimo = min(valores + [0])
         self.ax_barras.set_ylim(min(minimo * 1.2, 0), maximo + maximo * 0.20)
@@ -2516,19 +2491,10 @@ class CalculadorApp:
         self._atualizar_resumo(meses, por_mes)
         texto = _cor(TEXTO)
         sub = _cor(SUB)
-        grid = _cor(GRID)
 
         # ---- gráfico 1: gasto x orçamento por mês ----
-        self._preparar_ax(self.fig_evol, self.ax_evol)
-        self.ax_evol.clear()
-        self.ax_evol.set_title("Evolução: gasto x orçamento por mês",
-                               fontsize=12, fontweight="bold", color=texto, pad=10)
-        for lado in ("top", "right", "left"):
-            self.ax_evol.spines[lado].set_visible(False)
-        self.ax_evol.spines["bottom"].set_color(_cor(BORDA))
-        self.ax_evol.tick_params(left=False, labelleft=False, bottom=False)
-        self.ax_evol.tick_params(axis="x", labelsize=9, colors=texto)
-        self.ax_evol.yaxis.grid(True, color=grid, zorder=0)
+        self._estilizar_eixo(self.fig_evol, self.ax_evol,
+                             "Evolução: gasto x orçamento por mês")
         if meses:
             gasto_mes = [sum(por_mes[m].values()) for m in meses]
             orc_mes = [self.orcamentos.get(m, 0.0) + sum(
@@ -2557,16 +2523,8 @@ class CalculadorApp:
         self.canvas_evol.draw()
 
         # ---- gráfico 2: categorias empilhadas por mês ----
-        self._preparar_ax(self.fig_comp, self.ax_comp)
-        self.ax_comp.clear()
-        self.ax_comp.set_title("Gastos por categoria ao longo dos meses",
-                               fontsize=12, fontweight="bold", color=texto, pad=10)
-        for lado in ("top", "right", "left"):
-            self.ax_comp.spines[lado].set_visible(False)
-        self.ax_comp.spines["bottom"].set_color(_cor(BORDA))
-        self.ax_comp.tick_params(left=False, labelleft=False, bottom=False)
-        self.ax_comp.tick_params(axis="x", labelsize=9, colors=texto)
-        self.ax_comp.yaxis.grid(True, color=grid, zorder=0)
+        self._estilizar_eixo(self.fig_comp, self.ax_comp,
+                             "Gastos por categoria ao longo dos meses")
         presentes = [c for c in CATEGORIAS
                      if any(por_mes[m].get(c, 0) > 0 for m in meses)]
         extras = sorted({c for m in meses for c in por_mes[m]

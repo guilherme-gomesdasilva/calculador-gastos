@@ -92,18 +92,18 @@ def test_logos():
     assert c.instituicao_do_rotulo("Fatura de Cartão") is None
     assert c.instituicao_do_rotulo("Nubank") is None
 
-    assert c.carregar_logo("Nubank") is None  # sem arquivo: fica só a cor
+    assert c.imagem_logo("Nubank") is None  # sem arquivo: fica só a cor
     with open(c.arquivo_logo("Inter"), "w") as f:
         f.write("não é png")
-    assert c.carregar_logo("Inter") is None   # arquivo inválido não quebra
+    assert c.imagem_logo("Inter") is None   # arquivo inválido não quebra
 
     mpimg.imsave(c.arquivo_logo("Itaú"), [[[1.0, 0.5, 0.0]] * 4] * 2)
-    assert c.carregar_logo("Itaú").shape[:2] == (2, 4)
+    assert c.imagem_logo("Itaú").size == (4, 2)
 
     mpimg.imsave(c.arquivo_logo("Nubank", ".jpg"), [[[0.5, 0.0, 0.8]] * 3] * 3)
-    assert c.carregar_logo("Nubank") is None  # ainda em cache do 1º acesso
+    assert c.imagem_logo("Nubank") is None  # ainda em cache do 1º acesso
     c.imagem_logo.cache_clear()
-    assert c.carregar_logo("Nubank").shape[:2] == (3, 3)
+    assert c.imagem_logo("Nubank").size == (3, 3)
 
 
 def test_rendas_por_app():
@@ -116,8 +116,6 @@ def test_rendas_por_app():
     assert set(por_app) == set(c.APPS_DELIVERY)
     assert sum(por_app.values()) == 720.0
     assert outras == 850.0
-    assert c.rotulo_renda(ifood) == "Delivery - iFood"
-    assert c.rotulo_renda(freela) == "Freelance"
 
 
 def test_mesma_renda():
