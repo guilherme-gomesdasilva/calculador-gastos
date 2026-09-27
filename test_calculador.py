@@ -366,7 +366,26 @@ def test_caixinhas():
     assert c.nome_de_caixinha("   ", caixinhas)[1]
 
 
+def test_arquivo_seguro():
+    caminho = _usar_arquivo_temporario()
+    c.salvar_dados({"2026-09": 1.0}, [], [], [])
+    assert not os.path.exists(caminho + ".tmp")  # troca atômica, sem sobra
+    with open(caminho, "w", encoding="utf-8") as f:
+        f.write('{"gastos": [{"valor": 1')  # gravação interrompida
+    assert c.carregar_dados() == ({}, [], [], [])
+    copias = [n for n in os.listdir(os.path.dirname(caminho)) if ".corrompido-" in n]
+    assert len(copias) == 1 and not os.path.exists(caminho)  # o estragado ficou guardado
+
+
+def test_valor_digitado():
+    assert c.valor_digitado("3.500,50") == 3500.5 and c.valor_digitado("3500.50") == 3500.5
+    assert c.valor_digitado("R$ 3.500") == 3500.0 and c.valor_digitado("0") == 0.0
+    assert c.valor_digitado("abc") is None
+
+
 if __name__ == "__main__":
+    test_arquivo_seguro()
+    test_valor_digitado()
     test_caixinhas()
     test_achar_lancamentos()
     test_assistente_perguntas_nao_apagam()

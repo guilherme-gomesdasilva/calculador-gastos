@@ -374,7 +374,12 @@ def carregar_dados():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             dados = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        # guarda o arquivo estragado ao lado: a próxima gravação não apaga os dados
+        try:
+            os.replace(DATA_FILE, f"{DATA_FILE}.corrompido-{datetime.now():%Y%m%d-%H%M%S}")
+        except OSError:
+            pass
         return {}, [], [], []
 
     if isinstance(dados, list):  # formato antigo (lista pura)
@@ -398,8 +403,13 @@ def carregar_dados():
 
 
 def salvar_dados(orcamentos, gastos, rendas, caixinhas):
-    """Grava orçamentos por mês, gastos, rendas extras e caixinhas no arquivo JSON."""
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+    """Grava orçamentos por mês, gastos, rendas extras e caixinhas no arquivo JSON.
+
+    Grava num arquivo temporário e troca de uma vez: se o computador desligar no
+    meio, o arquivo antigo continua inteiro.
+    """
+    temporario = DATA_FILE + ".tmp"
+    with open(temporario, "w", encoding="utf-8") as f:
         json.dump(
             {"orcamentos": orcamentos, "gastos": gastos, "rendas": rendas,
              "caixinhas": caixinhas},
@@ -407,6 +417,9 @@ def salvar_dados(orcamentos, gastos, rendas, caixinhas):
             ensure_ascii=False,
             indent=2,
         )
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporario, DATA_FILE)
 
 
 MAX_CENTAVOS = 99_999_999_999  # R$ 999.999.999,99: limite dos campos de dinheiro
@@ -986,6 +999,18 @@ def salario_do_assistente(args, mes_padrao, texto_usuario=None):
         return valor
     mes = mes_do_modelo(args, mes_padrao)
     return (mes, valor) if mes else "Erro: mes deve ser mm/aaaa."
+
+
+def valor_digitado(texto):
+    """Valor escrito à mão (sem a máscara dos campos): "3.500,50", "3500,5",
+    "3500.50" e "3.500" -> float; None se não for número."""
+    texto = texto.strip().removeprefix("R$").strip()
+    if "," not in texto and re.fullmatch(r"\d+\.\d{1,2}", texto):
+        return float(texto)  # ponto seguido de 1-2 casas: decimal
+    try:
+        return float(texto.replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
 
 
 def pede_para_apagar(texto):
@@ -2367,7 +2392,7 @@ class CalculadorApp:
                                         "0 tira a meta):").get_input()
         if texto is None:
             return
-        meta = self._parse_valor(texto)
+        meta = valor_digitado(texto)
         if meta is None or meta < 0:
             self._toast("Informe a meta em reais, ex.: 3.500,00.", "erro")
             return
@@ -2573,9 +2598,16 @@ class CalculadorApp:
 
         def esperar():  # o Tk só pode ser mexido na thread principal
             try:
-                self._resposta_ollama(fila.get_nowait(), rodadas)
+                resposta = fila.get_nowait()
             except queue.Empty:
                 self.root.after(100, esperar)
+                return
+            try:
+                self._resposta_ollama(resposta, rodadas)
+            except Exception as erro:  # resposta inesperada: avisa e destrava o chat
+                self._escrever_chat("Erro", f"Algo deu errado com a resposta ({erro}). "
+                                    "Tente de novo.")
+                self.btn_chat.configure(state="normal", text="Enviar")
         esperar()
 
     def _executar_ferramenta(self, nome, args):
@@ -2709,13 +2741,16 @@ class CalculadorApp:
         chamadas = chamadas_de_ferramenta(msg)
         salvou, erros = False, []
         for chamada in chamadas:
-            funcao = chamada.get("function", {})
+            funcao = chamada.get("function") if isinstance(chamada, dict) else None
+            funcao = funcao if isinstance(funcao, dict) else {}
             args = funcao.get("arguments") or {}
             if isinstance(args, str):  # alguns modelos mandam o JSON como texto
                 try:
                     args = json.loads(args)
                 except ValueError:
                     args = {}
+            if not isinstance(args, dict):  # lista, número...: o modelo corrige
+                args = {}
             if funcao.get("name") in self._oferecidas:
                 ok, resultado = self._executar_ferramenta(funcao.get("name"), args)
             else:  # chamada escrita no texto de uma ferramenta que não foi oferecida
