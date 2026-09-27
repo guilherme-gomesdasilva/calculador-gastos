@@ -20,6 +20,7 @@ Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
 
 import bisect
 import calendar
+import difflib
 import itertools
 import json
 import os
@@ -803,9 +804,21 @@ FERRAMENTA_LANCAR = {"type": "function", "function": {
     }}}}
 
 
+FERRAMENTA_SALARIO = {"type": "function", "function": {
+    "name": "salario",
+    "description": "Define o salário do mês (troca o que havia). Salário não é ganho: "
+                   "use esta ferramenta, nunca lancar, quando o usuário falar de salário.",
+    "parameters": {"type": "object", "required": ["valor"], "properties": {
+        "valor": {"type": "number", "description": "valor em reais, ex.: 2800"},
+        "mes": {"type": "string", "description": "mm/aaaa; omita para o mês aberto no app"},
+    }}}}
+
+
 def _achar(texto, opcoes):
-    """A opção igual ao texto (sem ligar para maiúsculas/acentos) ou, se não
-    houver, a única que o contém ("uber" -> "Uber / 99"); senão None."""
+    """A opção igual ao texto (sem ligar para maiúsculas/acentos); se não houver,
+    a única que o contém ("uber" -> "Uber / 99"), a única contida nele
+    ("Transporte - Ônibus" -> "Transporte") ou a mais parecida, para erro de
+    digitação ("trasporte" -> "Transporte"); senão None."""
     def chave(t):
         return unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode().casefold().strip()
     procurado = chave(texto)
@@ -813,19 +826,50 @@ def _achar(texto, opcoes):
         return None
     iguais = [o for o in opcoes if chave(o) == procurado]
     contem = [o for o in opcoes if procurado in chave(o)]
-    return iguais[0] if iguais else contem[0] if len(contem) == 1 else None
+    dentro = [o for o in opcoes if chave(o) in procurado]
+    for achadas in (iguais, contem, dentro):
+        if len(achadas) == 1 or (achadas is iguais and achadas):
+            return achadas[0]
+    por_chave = {chave(o): o for o in opcoes}
+    parecida = difflib.get_close_matches(procurado, list(por_chave), n=1, cutoff=0.8)
+    return por_chave[parecida[0]] if parecida else None
 
 
 def numeros_do_texto(texto):
-    """Valores que aparecem no texto: "25", "12,50", "1.200", "12.5" (ambos os jeitos)."""
+    """Valores que aparecem no texto: "25", "12,50", "1.200", "12.5" (ambos os
+    jeitos) e "2 mil", "2,8 mil", "3k"."""
     valores = set()
-    for n in re.findall(r"\d+(?:[.,]\d+)*", texto):
+    for n, mil in re.findall(r"(\d+(?:[.,]\d+)*)\s*(mil\b|k\b)?", texto.lower()):
         for convertido in (n.replace(".", "").replace(",", "."), n.replace(",", "")):
             try:
-                valores.add(round(float(convertido), 2))
+                valores.add(round(float(convertido) * (1000 if mil else 1), 2))
             except ValueError:  # "1.2.3" no jeito americano
                 pass
     return valores
+
+
+def _valor_do_modelo(args, texto_usuario, minimo=0.01):
+    """Valor que o modelo mandou, se for válido e estiver escrito pelo usuário
+    (o modelo não inventa quanto foi); senão um texto de erro."""
+    try:
+        valor = round(float(args.get("valor")), 2)
+    except (TypeError, ValueError):
+        return "Erro: valor deve ser um número."
+    if not minimo <= valor <= MAX_CENTAVOS / 100:
+        return "Erro: valor fora do permitido."
+    if texto_usuario is not None and valor not in numeros_do_texto(texto_usuario):
+        return ("Erro: o usuário não escreveu esse valor. Não salve; pergunte quanto foi "
+                "(em números).")
+    return valor
+
+
+def salario_do_assistente(args, mes_padrao, texto_usuario=None):
+    """Valida "salario": retorna (mês "AAAA-MM", valor) ou um texto de erro."""
+    valor = _valor_do_modelo(args, texto_usuario, minimo=0)  # 0 apaga o salário
+    if isinstance(valor, str):
+        return valor
+    mes = mes_de_data("01/" + str(args["mes"])) if args.get("mes") else mes_padrao
+    return (mes, valor) if mes else "Erro: mes deve ser mm/aaaa."
 
 
 def lancamento_do_assistente(args, texto_usuario=None):
@@ -836,15 +880,11 @@ def lancamento_do_assistente(args, texto_usuario=None):
     erro que volta para o modelo corrigir.
     """
     tipo = str(args.get("tipo", "")).lower()
-    try:
-        valor = round(float(args.get("valor")), 2)
-    except (TypeError, ValueError):
-        valor = 0
-    if tipo not in ("gasto", "ganho") or not 0 < valor <= MAX_CENTAVOS / 100:
-        return "Erro: tipo deve ser gasto ou ganho, e valor maior que zero."
-    if texto_usuario is not None and valor not in numeros_do_texto(texto_usuario):
-        return ("Erro: o usuário não escreveu esse valor. Não lance; pergunte quanto foi "
-                "(em números).")
+    if tipo not in ("gasto", "ganho"):
+        return "Erro: tipo deve ser gasto ou ganho."
+    valor = _valor_do_modelo(args, texto_usuario)
+    if isinstance(valor, str):
+        return valor
     try:
         dia = datetime.strptime(args.get("data") or date.today().strftime("%d/%m/%Y"),
                                 "%d/%m/%Y")
@@ -2057,7 +2097,11 @@ class CalculadorApp:
             "invente valores; os totais já estão calculados. Perguntas sobre os dados "
             "respondem-se com texto, SEM ferramenta. Use a ferramenta lancar só quando "
             "o usuário contar um gasto ou ganho novo (ex.: \"gastei 20 no mercado\"); "
-            "depois confirme em uma frase. Se faltar o valor, pergunte antes.",
+            "depois confirme em uma frase. Para salário use a ferramenta salario. Se "
+            "faltar o valor, pergunte antes. O usuário escreve em português informal do "
+            "Brasil, muitas vezes sem acentos, com abreviações e erros de digitação (ex.: "
+            "\"salario\", \"alimentacao\", \"vc\", \"q\", \"merc\", \"2k\"): entenda o "
+            "sentido e use nas ferramentas os nomes certos das listas.",
             f"Hoje é {DIAS_SEMANA[hoje.weekday()]}, {hoje:%d/%m/%Y}; ontem foi "
             f"{date.fromordinal(hoje.toordinal() - 1):%d/%m/%Y}.",
             "",
@@ -2096,12 +2140,13 @@ class CalculadorApp:
         # cada mensagem vai sozinha: o prompt já traz os dados atualizados, e com o
         # histórico os modelos pequenos imitam "registrado" em vez de salvar
         self.chat_msgs = [{"role": "user", "content": texto}]
+        self._erros_no_turno = []
         self._pedir_ollama(MAX_RODADAS)
 
     def _pedir_ollama(self, rodadas):
         """Chama o Ollama numa thread (a janela não trava) e espera a resposta."""
         self.btn_chat.configure(state="disabled", text="Pensando…")
-        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": [FERRAMENTA_LANCAR],
+        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": [FERRAMENTA_LANCAR, FERRAMENTA_SALARIO],
                  "messages": [{"role": "system", "content": self._contexto_assistente()}]
                  + self.chat_msgs}
         fila = queue.Queue()
@@ -2113,6 +2158,28 @@ class CalculadorApp:
             except queue.Empty:
                 self.root.after(100, esperar)
         esperar()
+
+    def _executar_ferramenta(self, nome, args):
+        """Valida e executa o que o modelo pediu; devolve (salvou, texto do resultado)."""
+        texto = self.chat_msgs[0]["content"]  # a mensagem do usuário
+        if nome == "lancar":
+            resultado = lancamento_do_assistente(args, texto)
+            if isinstance(resultado, str):
+                return False, resultado
+            gasto, item = resultado
+            self._guardar_lancamento(gasto, item)
+            return True, (f"Registrado: {'gasto' if gasto else 'ganho'} {item['descricao']} "
+                          f"de {formatar_moeda(item['valor'])} em {item['data']}.")
+        if nome == "salario":
+            resultado = salario_do_assistente(args, self.mes_atual, texto)
+            if isinstance(resultado, str):
+                return False, resultado
+            mes, valor = resultado
+            self.orcamentos[mes] = valor
+            salvar_dados(self.orcamentos, self.gastos, self.rendas)
+            self._sincronizar_mes()  # campo Salário e cards
+            return True, f"Salário de {nome_mes(mes)} definido: {formatar_moeda(valor)}."
+        return False, "Erro: ferramenta desconhecida."
 
     def _resposta_ollama(self, msg, rodadas):
         if isinstance(msg, Exception):
@@ -2132,19 +2199,13 @@ class CalculadorApp:
                     args = json.loads(args)
                 except ValueError:
                     args = {}
-            resultado = (lancamento_do_assistente(args, self.chat_msgs[0]["content"])
-                         if funcao.get("name") == "lancar"
-                         else "Erro: ferramenta desconhecida.")
-            if isinstance(resultado, tuple):
-                gasto, item = resultado
-                self._guardar_lancamento(gasto, item)
+            ok, resultado = self._executar_ferramenta(funcao.get("name"), args)
+            if ok:
                 salvou = True
-                resultado = (f"Registrado: {'gasto' if gasto else 'ganho'} "
-                             f"{item['descricao']} de {formatar_moeda(item['valor'])} "
-                             f"em {item['data']}.")
                 self._escrever_chat("Lançamento", resultado)
             else:
                 erros.append(resultado)
+                self._erros_no_turno.append(resultado)
             self.chat_msgs.append({"role": "tool", "content": resultado})
         # Salvou: a linha "Lançamento" já confirma. Perguntar de novo ao modelo só
         # traz saldos inventados e o risco de lançar outra vez. Só erro: ele corrige.
@@ -2158,7 +2219,8 @@ class CalculadorApp:
             # ponytail: busca por palavras; modelo pequeno às vezes finge que salvou.
             # Acrescentar outras se aparecerem casos que escapem
             finge = any(p in msg["content"].lower() for p in ("registrado", "registrei", "salvei"))
-            if finge and not chamadas:
+            # a ferramenta falhou e o modelo respondeu com texto: nada foi salvo
+            if not chamadas and (finge or self._erros_no_turno):
                 self._escrever_chat("Erro", "Nada foi salvo nesta mensagem. Tente de novo "
                                     "com o valor e o tipo, ex.: \"ganhei 80 no iFood hoje\".")
         self.btn_chat.configure(state="normal", text="Enviar")

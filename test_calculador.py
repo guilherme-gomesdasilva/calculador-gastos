@@ -257,6 +257,24 @@ def test_lancamento_do_assistente():
     assert isinstance(c.lancamento_do_assistente(lazer, "gastei no cinema"), str)
     assert isinstance(c.lancamento_do_assistente(lazer, "gastei 50 no cinema"), tuple)
     assert c.numeros_do_texto("R$ 1.200,50 e 12.5 e 3") >= {1200.5, 12.5, 125.0, 3.0}
+    assert c.numeros_do_texto("2 mil, 2,8 mil e 3k") >= {2000.0, 2800.0, 3000.0}
+    # erros de digitação e falta de acento
+    assert c._achar("trasporte", c.CATEGORIAS_DIA) == "Transporte"
+    assert c._achar("alimentacao", c.CATEGORIAS_DIA) == "Alimentação"
+    assert c._achar("ifod", c.APPS_DELIVERY) == "iFood"
+    assert c._achar("cassino", c.CATEGORIAS_DIA) is None
+    assert c._achar("Transporte - Ônibus", c.CATEGORIAS_DIA) == "Transporte"
+    assert c._achar("Transporte", c.INSTITUICOES_TRANSPORTE) is None  # "Transporte - X" não
+
+
+def test_salario_do_assistente():
+    assert c.salario_do_assistente({"valor": 2800}, "2026-09", "lance 2800 de salario") == (
+        "2026-09", 2800.0)
+    assert c.salario_do_assistente({"valor": 2800, "mes": "10/2026"}, "2026-09",
+                                   "salario de outubro 2,8 mil") == ("2026-10", 2800.0)
+    assert isinstance(c.salario_do_assistente({"valor": 3000}, "2026-09", "meu salario"), str)
+    assert isinstance(c.salario_do_assistente({"valor": 10, "mes": "13/2026"}, "2026-09",
+                                              "10"), str)
 
 
 def test_chamadas_de_ferramenta():
@@ -276,6 +294,7 @@ def test_chamadas_de_ferramenta():
 if __name__ == "__main__":
     test_lancamento_do_assistente()
     test_chamadas_de_ferramenta()
+    test_salario_do_assistente()
     test_outros_por_ultimo()
     test_acumulado_poupancas()
     test_emprestimo_parcelado_nao_e_copiado_como_conta_fixa()
