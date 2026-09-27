@@ -118,7 +118,7 @@ CATEGORIA_CORES = {
     "Investimentos": "#059669",
 }
 
-# Aba "Reserva e Investimentos": guardar = gasto na categoria; tirar = renda na fonte
+# Aba "Reserva, Investimentos e Caixinhas": guardar = gasto na categoria; tirar = renda na fonte
 # poupança -> (categoria do aporte, fonte de renda do resgate)
 POUPANCAS = {
     "reserva": ("Reserva de Emergência", "Resgate da Reserva"),
@@ -1455,18 +1455,16 @@ class CalculadorApp:
         self.tabview.add("Assistente")
         self.tabview.add("Lançamentos")
         self.tabview.add("Diário")
-        self.tabview.add("Caixinhas")
         self.tabview.add("Gráficos do mês")
         self.tabview.add("Evolução")
-        self.tabview.add("Reserva e Investimentos")
+        self.tabview.add("Reserva, Investimentos e Caixinhas")
 
         self._montar_aba_assistente(self.tabview.tab("Assistente"))
         self._montar_aba_lancamentos(self.tabview.tab("Lançamentos"))
         self._montar_aba_diario(self.tabview.tab("Diário"))
-        self._montar_aba_caixinhas(self.tabview.tab("Caixinhas"))
         self._montar_aba_graficos(self.tabview.tab("Gráficos do mês"))
         self._montar_aba_evolucao(self.tabview.tab("Evolução"))
-        self._montar_aba_poupancas(self.tabview.tab("Reserva e Investimentos"))
+        self._montar_aba_poupancas(self.tabview.tab("Reserva, Investimentos e Caixinhas"))
 
     def _montar_header(self):
         header = ctk.CTkFrame(self.root, fg_color=ACCENT, corner_radius=0, height=76)
@@ -2241,36 +2239,38 @@ class CalculadorApp:
             legenda.configure(text=texto)
         self.dia_tiles[2][0].configure(text_color=COR_POS if saldo_dia >= 0 else COR_NEG)
 
-    def _montar_aba_caixinhas(self, parent):
-        """Caixinhas com nome e meta: guardar e retirar dinheiro para objetivos."""
-        parent.configure(fg_color="transparent")
+    def _montar_caixinhas(self, parent):
+        """Coluna das caixinhas (objetivos com nome e meta), ao lado da reserva."""
         form = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=12)
-        form.pack(fill="x", pady=(6, 10))
-        ctk.CTkLabel(form, text="🐷  Nova caixinha", font=self.ft_secao).pack(
-            side="left", padx=(16, 10), pady=14)
+        form.pack(fill="x", pady=(6, 8))
+        topo = ctk.CTkFrame(form, fg_color="transparent")
+        topo.pack(fill="x", padx=14, pady=(12, 6))
+        ctk.CTkLabel(topo, text="🐷  Caixinhas", font=self.ft_secao).pack(side="left")
+        self.cx_total = ctk.CTkLabel(topo, text="", font=self.ft_bold,
+                                     text_color=CATEGORIA_CORES[CATEGORIA_CAIXINHA])
+        self.cx_total.pack(side="right")
+        linha = ctk.CTkFrame(form, fg_color="transparent")
+        linha.pack(fill="x", padx=14, pady=(0, 12))
         self.cx_nome_var, self.cx_meta_var = tk.StringVar(), tk.StringVar()
-        nome = ctk.CTkEntry(form, textvariable=self.cx_nome_var, width=200,
-                            font=self.ft_normal, placeholder_text="Nome (ex.: Viagem)")
-        nome.pack(side="left", padx=4)
-        meta = ctk.CTkEntry(form, textvariable=self.cx_meta_var, width=140,
-                            font=self.ft_normal, placeholder_text="Meta R$ (opcional)")
-        meta.pack(side="left", padx=4)
+        nome = ctk.CTkEntry(linha, textvariable=self.cx_nome_var, width=130,
+                            font=self.ft_normal, placeholder_text="Nova (ex.: Viagem)")
+        nome.pack(side="left", fill="x", expand=True)
+        meta = ctk.CTkEntry(linha, textvariable=self.cx_meta_var, width=100,
+                            font=self.ft_normal, placeholder_text="Meta (opc.)")
+        meta.pack(side="left", padx=6)
         self._campo_dinheiro(meta, self.cx_meta_var)
         for entrada in (nome, meta):
             entrada.bind("<Return>", lambda e: self._criar_caixinha_ui())
-        ctk.CTkButton(form, text="➕  Criar", width=100, font=self.ft_bold, fg_color=ACCENT,
+        ctk.CTkButton(linha, text="➕  Criar", width=80, font=self.ft_bold, fg_color=ACCENT,
                       hover_color=ACCENT_HOVER, command=self._criar_caixinha_ui).pack(
-            side="left", padx=8)
-        self.cx_total = ctk.CTkLabel(form, text="", font=self.ft_bold,
-                                     text_color=CATEGORIA_CORES[CATEGORIA_CAIXINHA])
-        self.cx_total.pack(side="right", padx=16)
+            side="left")
         self.cx_lista = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         self.cx_lista.pack(fill="both", expand=True)
         self.cx_cards = {}  # nome -> (rótulo do valor, barra, rótulo da porcentagem)
 
     def _atualizar_caixinhas(self):
         saldos = saldos_caixinhas(self.caixinhas, self.gastos, self.rendas)
-        self.cx_total.configure(text=f"Guardado: {formatar_moeda(sum(saldos.values()))}")
+        self.cx_total.configure(text=formatar_moeda(sum(saldos.values())))
         # recria os cards só se as caixinhas mudarem (criar, renomear, excluir);
         # guardar/retirar só atualiza o texto e a barra
         desenhadas = tuple((cx["nome"], cx.get("meta", 0)) for cx in self.caixinhas)
@@ -2282,7 +2282,8 @@ class CalculadorApp:
             if not self.caixinhas:
                 ctk.CTkLabel(self.cx_lista, text="Nenhuma caixinha ainda. Crie uma acima ou "
                              "peça ao assistente: \"cria uma caixinha viagem com meta de "
-                             "3000\".", text_color=SUB, font=self.ft_normal).pack(pady=30)
+                             "3000\".", text_color=SUB, font=self.ft_normal, wraplength=300,
+                             justify="left").pack(pady=30, padx=10)
             for cx in self.caixinhas:
                 self.cx_cards[cx["nome"]] = self._card_caixinha(cx)
         for cx in self.caixinhas:
@@ -2300,30 +2301,32 @@ class CalculadorApp:
         nome = cx["nome"]
         card = ctk.CTkFrame(self.cx_lista, fg_color=CARD2, corner_radius=12)
         card.pack(fill="x", pady=4, padx=2)
-        topo = ctk.CTkFrame(card, fg_color="transparent")
-        topo.pack(fill="x", padx=16, pady=(12, 4))
-        ctk.CTkLabel(topo, text=f"🐷  {nome}", font=self.ft_secao).pack(side="left")
-        valor = ctk.CTkLabel(topo, text="", font=self.ft_valor_pq,
+        # nome e valor em linhas separadas: a coluna é estreita
+        ctk.CTkLabel(card, text=f"🐷  {nome}", font=self.ft_secao, wraplength=280,
+                     justify="left").pack(anchor="w", padx=16, pady=(12, 0))
+        valor = ctk.CTkLabel(card, text="", font=self.ft_valor_pq,
                              text_color=CATEGORIA_CORES[CATEGORIA_CAIXINHA])
-        valor.pack(side="right")
+        valor.pack(anchor="w", padx=16, pady=(0, 4))
         barra = pct = None
         if cx.get("meta"):
             barra = ctk.CTkProgressBar(card, height=10, corner_radius=6)
             barra.pack(fill="x", padx=16, pady=(0, 2))
             pct = ctk.CTkLabel(card, text="", text_color=SUB, font=self.ft_pequena)
             pct.pack(anchor="w", padx=16)
-        acoes = ctk.CTkFrame(card, fg_color="transparent")
-        acoes.pack(fill="x", padx=16, pady=(4, 12))
+        dinheiro = ctk.CTkFrame(card, fg_color="transparent")
+        dinheiro.pack(fill="x", padx=16, pady=(6, 2))
         var = tk.StringVar()
-        entrada = ctk.CTkEntry(acoes, textvariable=var, width=120, font=self.ft_normal,
+        entrada = ctk.CTkEntry(dinheiro, textvariable=var, width=100, font=self.ft_normal,
                                placeholder_text="R$ 0,00")
-        entrada.pack(side="left")
+        entrada.pack(side="left", fill="x", expand=True)
         self._campo_dinheiro(entrada, var)
         for texto, guardar, cor, hover in (("Guardar", True, COR_RENDA, COR_RENDA_HOVER),
                                            ("Retirar", False, COR_GASTO, "#D97706")):
-            ctk.CTkButton(acoes, text=texto, width=90, font=self.ft_bold, fg_color=cor,
+            ctk.CTkButton(dinheiro, text=texto, width=80, font=self.ft_bold, fg_color=cor,
                           hover_color=hover, command=lambda g=guardar: self._movimentar_ui(
-                              nome, var, g)).pack(side="left", padx=(8, 0))
+                              nome, var, g)).pack(side="left", padx=(6, 0))
+        acoes = ctk.CTkFrame(card, fg_color="transparent")
+        acoes.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkButton(acoes, text="🗑  Excluir", width=90, font=self.ft_pequena,
                       fg_color="transparent", text_color=COR_NEG, hover_color=CARD,
                       command=lambda: self._toast_resultado(self.excluir_caixinha(nome))
@@ -2809,7 +2812,8 @@ class CalculadorApp:
 
     def _montar_aba_poupancas(self, parent):
         parent.configure(fg_color="transparent")
-        parent.columnconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=3)  # reserva e investimentos
+        parent.columnconfigure(1, weight=2, minsize=360)  # caixinhas
         parent.rowconfigure(1, weight=3, uniform="graficos_poupanca")  # acumulado maior
         parent.rowconfigure(2, weight=2, uniform="graficos_poupanca")
 
@@ -2825,6 +2829,10 @@ class CalculadorApp:
         self.canvas_aportes = self._criar_canvas_grafico(parent, 2, 0)
         self.fig_aportes = self.canvas_aportes.figure
         self.ax_aportes = self.fig_aportes.add_subplot(111)
+
+        caixinhas = ctk.CTkFrame(parent, fg_color="transparent")
+        caixinhas.grid(row=0, column=1, rowspan=3, sticky="nsew", padx=(6, 0))
+        self._montar_caixinhas(caixinhas)
 
     def _montar_resumo_evolucao(self, parent):
         self.resumo_tiles = self._montar_tiles(parent, [
