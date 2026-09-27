@@ -32,7 +32,7 @@ import tkinter as tk
 import unicodedata
 import urllib.request
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -780,9 +780,10 @@ def novo_lancamento(gasto, valor, data_texto, escolha, sub=None, cartao=None):
 
 # ------------------------------------------------------------ assistente ---
 # Modelo local do Ollama (https://ollama.com): troque por outro que suporte
-# ferramentas, ex.: "qwen2.5-coder:14b" (melhor, mais lento) ou "llama3.1".
+# ferramentas. O "qwen2.5-coder:7b" responde em 1-5 s, mas erra somas e datas;
+# o 14b acertou todos os testes (2-15 s por mensagem).
 OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODELO = "qwen2.5-coder:7b"
+OLLAMA_MODELO = "qwen2.5-coder:14b"
 MAX_RODADAS = 4  # tentativas do modelo (ex.: corrigir categoria inválida) por mensagem
 
 FERRAMENTA_LANCAR = {"type": "function", "function": {
@@ -908,9 +909,37 @@ def salario_do_assistente(args, mes_padrao, texto_usuario=None):
     return (mes, valor) if mes else "Erro: mes deve ser mm/aaaa."
 
 
+def pede_para_apagar(texto):
+    """O usuário pediu para apagar algo? (limpar/remover só rodam se sim)"""
+    return any(v in _chave(texto) for v in
+               ("apag", "remov", "tir", "limp", "exclu", "delet", "zer", "desfaz"))
+
+
+def totais_por_dia(itens):
+    """{date: soma dos valores} dos gastos ou rendas (datas inválidas ficam de fora)."""
+    totais = {}
+    for item in itens:
+        try:
+            dia = datetime.strptime(item["data"].strip(), "%d/%m/%Y").date()
+        except (KeyError, ValueError):
+            continue
+        totais[dia] = totais.get(dia, 0.0) + item["valor"]
+    return totais
+
+
 def mes_do_modelo(args, mes_padrao):
-    """"mm/aaaa" (ou "m/aaaa") dos argumentos -> "AAAA-MM"; sem mês, o padrão."""
-    return mes_de_data("01/" + str(args["mes"]).strip()) if args.get("mes") else mes_padrao
+    """Mês dos argumentos -> "AAAA-MM": aceita "09/2026", "2026-09", "setembro",
+    "setembro de 2026" e "set" (sem ano: o atual); sem mês, o padrão; inválido, None."""
+    texto = _chave(args.get("mes") or "")
+    if not texto:
+        return mes_padrao
+    if m := re.fullmatch(r"(\d{4})-(\d{1,2})", texto):
+        return mes_de_data(f"01/{m[2]}/{m[1]}")
+    for i, (nome, abrev) in enumerate(zip(MESES_PT, MESES_ABREV)):
+        if texto.startswith(abrev) or _chave(nome) in texto:
+            ano = re.search(r"\d{4}", texto)
+            return f"{int(ano[0]) if ano else date.today().year:04d}-{i + 1:02d}"
+    return mes_de_data("01/" + texto)
 
 
 def achar_lancamentos(gastos, rendas, args, mes):
@@ -2163,12 +2192,14 @@ class CalculadorApp:
         linhas = [
             "Você é o assistente financeiro do app Calculador de Gastos. Responda em "
             "português do Brasil, de forma curta e direta. Use só os dados abaixo e não "
-            "invente valores; os totais já estão calculados. Perguntas sobre os dados "
-            "respondem-se com texto, SEM ferramenta. Use a ferramenta lancar só quando "
+            "invente valores; os totais já estão calculados. Perguntas e pedidos para "
+            "ver, mostrar ou dar informações (ex.: \"me mostre meus ganhos diarios\", "
+            "\"quanto ganhei essa semana\") respondem-se com texto a partir dos dados, "
+            "SEM ferramenta. Use a ferramenta lancar só quando "
             "o usuário contar um gasto ou ganho novo (ex.: \"gastei 20 no mercado\"); "
             "depois confirme em uma frase. Para salário use a ferramenta salario; para "
-            "apagar tudo de um mês, limpar; para apagar um lançamento, remover; para ver "
-            "outro mês, mudar_mes. Se "
+            "apagar tudo de um mês, limpar; para apagar um lançamento, remover (só se o "
+            "usuário pedir para apagar); para perguntas sobre outro mês, mudar_mes. Se "
             "faltar o valor, pergunte antes. O usuário escreve em português informal do "
             "Brasil, muitas vezes sem acentos, com abreviações e erros de digitação (ex.: "
             "\"salario\", \"alimentacao\", \"vc\", \"q\", \"merc\", \"2k\"): entenda o "
@@ -2195,6 +2226,16 @@ class CalculadorApp:
             por_fonte[fonte] = por_fonte.get(fonte, 0.0) + r["valor"]
         linhas += ["", f"Ganhos por fonte/app em {mes} (salário à parte):"]
         linhas += [f"- {fonte}: {formatar_moeda(v)}" for fonte, v in por_fonte.items()]
+        ganhos_dia, gastos_dia = totais_por_dia(self.rendas), totais_por_dia(self.gastos)
+        for titulo, por_dia in (("Ganhos", ganhos_dia), ("Gastos", gastos_dia)):
+            linhas += ["", f"{titulo} por dia em {mes} (só dias com valor):"]
+            linhas += [f"- {d:%d/%m} ({DIAS_SEMANA[d.weekday()]}): {formatar_moeda(v)}"
+                       for d, v in sorted(por_dia.items()) if f"{d:%Y-%m}" == self.mes_atual]
+        inicio = hoje - timedelta(days=hoje.weekday())  # segunda-feira desta semana
+        semana = [inicio + timedelta(days=i) for i in range(hoje.weekday() + 1)]
+        linhas.append(f"Esta semana ({inicio:%d/%m} a {hoje:%d/%m}): ganhos "
+                      f"{formatar_moeda(sum(ganhos_dia.get(d, 0) for d in semana))}, gastos "
+                      f"{formatar_moeda(sum(gastos_dia.get(d, 0) for d in semana))}.")
         linhas += ["", f"Lançamentos de {mes}:"]
         linhas += [f"- {g['data']} gasto {rotulo_categoria(g)} ({g.get('cartao', CARTAO_PADRAO)})"
                    f" {formatar_moeda(g['valor'])}" for g in self.gastos_do_mes()]
@@ -2231,7 +2272,9 @@ class CalculadorApp:
         esperar()
 
     def _executar_ferramenta(self, nome, args):
-        """Valida e executa o que o modelo pediu; devolve (salvou, texto do resultado)."""
+        """Valida e executa o que o modelo pediu; devolve (feito, texto do resultado):
+        feito é True (salvou/apagou, o turno acaba), False (erro, o modelo corrige)
+        ou None (trocou de mês, o modelo segue e responde)."""
         texto = self.chat_msgs[0]["content"]  # a mensagem do usuário
         if nome == "lancar":
             resultado = lancamento_do_assistente(args, texto)
@@ -2250,14 +2293,19 @@ class CalculadorApp:
             salvar_dados(self.orcamentos, self.gastos, self.rendas)
             self._sincronizar_mes()  # campo Salário e cards
             return True, f"Salário de {nome_mes(mes)} definido: {formatar_moeda(valor)}."
+        if nome in ("limpar", "remover") and not pede_para_apagar(texto):
+            return False, "Erro: o usuário não pediu para apagar nada. Responda com texto."
         if nome in ("limpar", "remover", "mudar_mes"):
             mes = mes_do_modelo(args, self.mes_atual)
             if not mes:
                 return False, "Erro: mes deve ser mm/aaaa."
+            if nome == "mudar_mes" and mes == self.mes_atual:
+                return False, "Erro: o app já mostra esse mês. Responda com texto usando os dados."
             if mes != self.mes_atual:  # mostra o mês antes de mexer nele
                 self._ir_para_chave(mes)
-            if nome == "mudar_mes":
-                return True, f"Mostrando {nome_mes(mes)}."
+            if nome == "mudar_mes":  # None: não salvou nada, o modelo segue e responde
+                return None, (f"O app agora mostra {nome_mes(mes)} e os dados do prompt são "
+                              "desse mês. Responda à pergunta do usuário com texto.")
         if nome == "limpar":
             limpar = {"gastos": self.limpar_lancamentos, "rendas": self.limpar_rendas,
                       "salario": self.limpar_salario}.get(_achar(args.get("oque", ""),
@@ -2323,6 +2371,8 @@ class CalculadorApp:
             if ok:
                 salvou = True
                 self._escrever_chat("Feito", resultado)
+            elif ok is None:  # só trocou de mês
+                self._escrever_chat("Feito", f"Mostrando {nome_mes(self.mes_atual)}.")
             else:
                 erros.append(resultado)
                 self._erros_no_turno.append(resultado)
@@ -2339,8 +2389,11 @@ class CalculadorApp:
             # ponytail: busca por palavras; modelo pequeno às vezes finge que salvou.
             # Acrescentar outras se aparecerem casos que escapem
             finge = any(p in msg["content"].lower() for p in ("registrado", "registrei", "salvei"))
-            # a ferramenta falhou e o modelo respondeu com texto: nada foi salvo
-            if not chamadas and (finge or self._erros_no_turno):
+            # pediu uma ação (tem valor ou "apagar"), a ferramenta falhou e o modelo
+            # respondeu com texto: nada foi feito. Em pergunta, a resposta basta.
+            texto = self.chat_msgs[0]["content"]
+            pediu_acao = pede_para_apagar(texto) or numeros_do_texto(texto)
+            if not chamadas and (finge or (self._erros_no_turno and pediu_acao)):
                 self._escrever_chat("Erro", "Nada foi feito nesta mensagem. Tente de novo "
                                     "com mais detalhes, ex.: \"ganhei 80 no iFood hoje\".")
         self.btn_chat.configure(state="normal", text="Enviar")

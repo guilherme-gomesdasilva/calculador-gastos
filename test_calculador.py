@@ -311,10 +311,28 @@ def test_achar_lancamentos():
     assert c.mes_do_modelo({"mes": "8/2026"}, "x") == "2026-08"
     assert c.mes_do_modelo({}, "2026-09") == "2026-09"
     assert c.mes_do_modelo({"mes": "13/2026"}, "2026-09") is None
+    assert c.mes_do_modelo({"mes": "2026-08"}, "x") == "2026-08"
+    assert c.mes_do_modelo({"mes": "Março de 2025"}, "x") == "2025-03"
+    assert c.mes_do_modelo({"mes": "maio"}, "x") == f"{c.date.today().year}-05"
+    assert c.mes_do_modelo({"mes": "set"}, "x") == f"{c.date.today().year}-09"
+
+
+def test_assistente_perguntas_nao_apagam():
+    for pedido in ("limpe os gastos do mes", "remove o uber", "tira o salario",
+                   "apaga o freelance", "exclui isso", "zera o mes"):
+        assert c.pede_para_apagar(pedido), pedido
+    for pergunta in ("me de os meus ganhos diarios", "me mostre os meus ganhos",
+                     "quanto ganhei essa semana?", "gastei 20 no mercado"):
+        assert not c.pede_para_apagar(pergunta), pergunta
+    dias = c.totais_por_dia([{"data": "05/09/2026", "valor": 10.0},
+                             {"data": "05/09/2026", "valor": 2.5},
+                             {"data": "xx", "valor": 1.0}])
+    assert dias == {c.date(2026, 9, 5): 12.5}
 
 
 if __name__ == "__main__":
     test_achar_lancamentos()
+    test_assistente_perguntas_nao_apagam()
     test_lancamento_do_assistente()
     test_chamadas_de_ferramenta()
     test_salario_do_assistente()
