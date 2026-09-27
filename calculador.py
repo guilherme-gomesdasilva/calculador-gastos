@@ -850,6 +850,16 @@ def _chave(texto):
     return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().casefold().strip()
 
 
+def ferramentas_para(texto):
+    """Só oferece ao modelo o que pode passar nas checagens: lançar e salário
+    pedem um valor escrito, limpar e remover pedem "apagar". Numa pergunta sobram
+    mudar_mes e copiar_contas_fixas, e o modelo responde com texto."""
+    if numeros_do_texto(texto) or pede_para_apagar(texto):
+        return FERRAMENTAS
+    return [f for f in FERRAMENTAS
+            if f["function"]["name"] in ("mudar_mes", "copiar_contas_fixas")]
+
+
 def _achar(texto, opcoes):
     """A opção igual ao texto (sem ligar para maiúsculas/acentos); se não houver,
     a única que o contém ("uber" -> "Uber / 99"), a única contida nele
@@ -978,6 +988,12 @@ def lancamento_do_assistente(args, texto_usuario=None):
     erro que volta para o modelo corrigir.
     """
     tipo = str(args.get("tipo", "")).lower()
+    # o modelo às vezes troca o tipo ("fiz 250 no ifood" virou gasto): categoria
+    # que só existe de um lado (Delivery / Apps, Transporte...) decide
+    categoria = args.get("categoria", "")
+    e_gasto, e_ganho = _achar(categoria, CATEGORIAS_DIA), _achar(categoria, FONTES_RENDA)
+    if bool(e_gasto) != bool(e_ganho):
+        tipo = "gasto" if e_gasto else "ganho"
     if tipo not in ("gasto", "ganho"):
         return "Erro: tipo deve ser gasto ou ganho."
     valor = _valor_do_modelo(args, texto_usuario)
@@ -990,7 +1006,7 @@ def lancamento_do_assistente(args, texto_usuario=None):
         return "Erro: data deve ser dd/mm/aaaa."
     gasto = tipo == "gasto"
     opcoes = CATEGORIAS_DIA if gasto else FONTES_RENDA
-    escolha = _achar(args.get("categoria", ""), opcoes)
+    escolha = _achar(categoria, opcoes)
     if not escolha:
         return "Erro: categoria deve ser uma de: " + ", ".join(opcoes)
     subs = subopcoes(gasto, escolha)
@@ -2217,30 +2233,33 @@ class CalculadorApp:
                           f"{formatar_moeda(rendas)} | {formatar_moeda(gastos)} | "
                           f"{formatar_moeda(salario + rendas - gastos)}")
         mes = nome_mes(self.mes_atual)
-        linhas += ["", f"Gastos por categoria em {mes}:"]
-        linhas += [f"- {cat}: {formatar_moeda(v)}"
-                   for cat, v in totais_por_categoria(self.gastos_do_mes()).items()]
+        def secao(titulo, itens):  # vazia diz "nenhum": o modelo não fica em dúvida
+            linhas.extend(["", titulo] + (itens or ["- nenhum"]))
+
+        secao(f"Gastos por categoria em {mes}:",
+              [f"- {cat}: {formatar_moeda(v)}"
+               for cat, v in totais_por_categoria(self.gastos_do_mes()).items()])
         por_fonte = {}
         for r in self.rendas_do_mes():
             fonte = r.get("app") or r.get("fonte", FONTE_PADRAO)
             por_fonte[fonte] = por_fonte.get(fonte, 0.0) + r["valor"]
-        linhas += ["", f"Ganhos por fonte/app em {mes} (salário à parte):"]
-        linhas += [f"- {fonte}: {formatar_moeda(v)}" for fonte, v in por_fonte.items()]
+        secao(f"Ganhos por fonte/app em {mes} (salário à parte):",
+              [f"- {fonte}: {formatar_moeda(v)}" for fonte, v in por_fonte.items()])
         ganhos_dia, gastos_dia = totais_por_dia(self.rendas), totais_por_dia(self.gastos)
         for titulo, por_dia in (("Ganhos", ganhos_dia), ("Gastos", gastos_dia)):
-            linhas += ["", f"{titulo} por dia em {mes} (só dias com valor):"]
-            linhas += [f"- {d:%d/%m} ({DIAS_SEMANA[d.weekday()]}): {formatar_moeda(v)}"
-                       for d, v in sorted(por_dia.items()) if f"{d:%Y-%m}" == self.mes_atual]
+            secao(f"{titulo} por dia em {mes} (só dias com valor):",
+                  [f"- {d:%d/%m} ({DIAS_SEMANA[d.weekday()]}): {formatar_moeda(v)}"
+                   for d, v in sorted(por_dia.items()) if f"{d:%Y-%m}" == self.mes_atual])
         inicio = hoje - timedelta(days=hoje.weekday())  # segunda-feira desta semana
         semana = [inicio + timedelta(days=i) for i in range(hoje.weekday() + 1)]
         linhas.append(f"Esta semana ({inicio:%d/%m} a {hoje:%d/%m}): ganhos "
                       f"{formatar_moeda(sum(ganhos_dia.get(d, 0) for d in semana))}, gastos "
                       f"{formatar_moeda(sum(gastos_dia.get(d, 0) for d in semana))}.")
-        linhas += ["", f"Lançamentos de {mes}:"]
-        linhas += [f"- {g['data']} gasto {rotulo_categoria(g)} ({g.get('cartao', CARTAO_PADRAO)})"
-                   f" {formatar_moeda(g['valor'])}" for g in self.gastos_do_mes()]
-        linhas += [f"- {r['data']} ganho {r.get('app') or r.get('fonte', FONTE_PADRAO)}"
-                   f" {formatar_moeda(r['valor'])}" for r in self.rendas_do_mes()]
+        secao(f"Lançamentos de {mes}:",
+              [f"- {g['data']} gasto {rotulo_categoria(g)} ({g.get('cartao', CARTAO_PADRAO)})"
+               f" {formatar_moeda(g['valor'])}" for g in self.gastos_do_mes()]
+              + [f"- {r['data']} ganho {r.get('app') or r.get('fonte', FONTE_PADRAO)}"
+                 f" {formatar_moeda(r['valor'])}" for r in self.rendas_do_mes()])
         return "\n".join(linhas)
 
     def _enviar_chat(self):
@@ -2258,7 +2277,8 @@ class CalculadorApp:
     def _pedir_ollama(self, rodadas):
         """Chama o Ollama numa thread (a janela não trava) e espera a resposta."""
         self.btn_chat.configure(state="disabled", text="Pensando…")
-        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": FERRAMENTAS,
+        corpo = {"model": OLLAMA_MODELO, "stream": False,
+                 "tools": ferramentas_para(self.chat_msgs[0]["content"]),
                  "messages": [{"role": "system", "content": self._contexto_assistente()}]
                  + self.chat_msgs}
         fila = queue.Queue()
@@ -2384,6 +2404,8 @@ class CalculadorApp:
             return
         for erro in erros:
             self._escrever_chat("Erro", erro)
+        if not chamadas and not msg.get("content"):
+            self._escrever_chat("Assistente", "Não entendi. Pode escrever de outro jeito?")
         if msg.get("content"):
             self._escrever_chat("Assistente", msg["content"])
             # ponytail: busca por palavras; modelo pequeno às vezes finge que salvou.
@@ -2393,7 +2415,7 @@ class CalculadorApp:
             # respondeu com texto: nada foi feito. Em pergunta, a resposta basta.
             texto = self.chat_msgs[0]["content"]
             pediu_acao = pede_para_apagar(texto) or numeros_do_texto(texto)
-            if not chamadas and (finge or (self._erros_no_turno and pediu_acao)):
+            if not chamadas and pediu_acao and (finge or self._erros_no_turno):
                 self._escrever_chat("Erro", "Nada foi feito nesta mensagem. Tente de novo "
                                     "com mais detalhes, ex.: \"ganhei 80 no iFood hoje\".")
         self.btn_chat.configure(state="normal", text="Enviar")

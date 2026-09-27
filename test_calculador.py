@@ -242,11 +242,20 @@ def test_lancamento_do_assistente():
     _, item = c.lancamento_do_assistente(
         {"tipo": "gasto", "valor": 12, "categoria": "Transporte", "detalhe": "uber"})
     assert item["instituicao"] == "Uber / 99"  # a única opção que contém "uber"
+    # tipo trocado pelo modelo: a categoria de um lado só decide
+    gasto, item = c.lancamento_do_assistente(
+        {"tipo": "gasto", "valor": 250, "categoria": "Delivery / Apps", "detalhe": "iFood"},
+        "fiz 250 no ifood")
+    assert not gasto and item["app"] == "iFood"
+    gasto, _ = c.lancamento_do_assistente({"tipo": "ganho", "valor": 9, "categoria": "Luz"})
+    assert gasto
+    gasto, _ = c.lancamento_do_assistente({"tipo": "ganho", "valor": 9, "categoria": "Outros"})
+    assert not gasto  # "Outros" existe nos dois lados: fica o tipo do modelo
     assert c._achar("", c.CARTOES) is None and c._achar("o", c.CARTOES) is None  # ambíguo
     assert item["data"] == c.date.today().strftime("%d/%m/%Y")  # sem data: hoje
     for ruim in ({"tipo": "gasto", "valor": 0, "categoria": "Lazer"},
                  {"tipo": "gasto", "valor": "abc", "categoria": "Lazer"},
-                 {"tipo": "roubo", "valor": 10, "categoria": "Lazer"},
+                 {"tipo": "roubo", "valor": 10, "categoria": "Outros"},
                  {"tipo": "gasto", "valor": 10, "categoria": "Cassino"},
                  {"tipo": "gasto", "valor": 10, "categoria": "Parcelamento de Compras"},
                  {"tipo": "gasto", "valor": 10, "categoria": "Lazer", "data": "31/02/2026"},
@@ -328,6 +337,9 @@ def test_assistente_perguntas_nao_apagam():
                              {"data": "05/09/2026", "valor": 2.5},
                              {"data": "xx", "valor": 1.0}])
     assert dias == {c.date(2026, 9, 5): 12.5}
+    nomes = lambda texto: {f["function"]["name"] for f in c.ferramentas_para(texto)}
+    assert nomes("quanto sobrou?") == {"mudar_mes", "copiar_contas_fixas"}
+    assert "lancar" in nomes("fiz 250 no ifood") and "remover" in nomes("apaga o uber")
 
 
 if __name__ == "__main__":
