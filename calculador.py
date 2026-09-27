@@ -128,6 +128,8 @@ CATEGORIAS_PARCELADAS = {
     CATEGORIA_PARCELAMENTO: ([f"{n}x" for n in (2, 3, 4, 5, 6, 10, 12)], 48),
     "Financiamento/Empréstimo": ([f"{n}x" for n in (12, 24, 36, 48)], 420),
 }
+# aba Diário: gastos do dia a dia (parcelamentos continuam na aba Lançamentos)
+CATEGORIAS_DIA = [c for c in CATEGORIAS if c not in CATEGORIAS_PARCELADAS]
 
 
 def quantidade_parcelas(texto, maximo):
@@ -293,6 +295,8 @@ MESES_ABREV = [
     "jan", "fev", "mar", "abr", "mai", "jun",
     "jul", "ago", "set", "out", "nov", "dez",
 ]
+
+DIAS_SEMANA = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 
 def label_mes_curto(chave):
@@ -771,6 +775,7 @@ class CalculadorApp:
 
         self.orcamentos, self.gastos, self.rendas = carregar_dados()
         self.mes_atual = mes_atual_chave()
+        self.dia = date.today()  # dia exibido na aba Diário
         self._popup_mes = None
         self._toast_lbl = None
         self._editando = None  # ("g" | "r", índice) enquanto edita um lançamento
@@ -950,6 +955,9 @@ class CalculadorApp:
         self._sincronizar_mes()
 
     def _sincronizar_mes(self):
+        if self.dia.strftime("%Y-%m") != self.mes_atual:  # Diário acompanha o mês
+            ano, mes = (int(x) for x in self.mes_atual.split("-"))
+            self.dia = date.today() if self.mes_atual == mes_atual_chave() else date(ano, mes, 1)
         self.mes_btn.configure(text=nome_mes(self.mes_atual))
         self.orc_var.set(formatar_numero(self.orcamento_do_mes()))
         self._preencher_renda()
@@ -1078,11 +1086,13 @@ class CalculadorApp:
                                       segmented_button_selected_hover_color=ACCENT_HOVER)
         self.tabview.pack(fill="both", expand=True, pady=(6, 0))
         self.tabview.add("Lançamentos")
+        self.tabview.add("Diário")
         self.tabview.add("Gráficos do mês")
         self.tabview.add("Evolução")
         self.tabview.add("Reserva e Investimentos")
 
         self._montar_aba_lancamentos(self.tabview.tab("Lançamentos"))
+        self._montar_aba_diario(self.tabview.tab("Diário"))
         self._montar_aba_graficos(self.tabview.tab("Gráficos do mês"))
         self._montar_aba_evolucao(self.tabview.tab("Evolução"))
         self._montar_aba_poupancas(self.tabview.tab("Reserva e Investimentos"))
@@ -1592,6 +1602,285 @@ class CalculadorApp:
         self.renda_app_logo.configure(image=logo, text="" if logo else app,
                                       fg_color="transparent")
         self.linha_app.pack(fill="x", padx=16, pady=(0, 14))
+
+    def _montar_aba_diario(self, parent):
+        """Gastos e ganhos do dia: cada um vira um gasto/renda com a data do dia,
+        então os cards e gráficos do mês somam tudo sozinhos."""
+        parent.configure(fg_color="transparent")
+
+        # ---- formulário em uma linha: tipo | valor | categoria/fonte | sub | pagamento ----
+        form = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=12)
+        form.pack(fill="x", pady=(6, 10))
+        form.columnconfigure(5, weight=1)
+        self.dia_tipo = tk.StringVar(value="Gasto")
+        ctk.CTkSegmentedButton(form, values=["Gasto", "Ganho"], variable=self.dia_tipo,
+                               font=self.ft_bold, selected_color=ACCENT,
+                               selected_hover_color=ACCENT_HOVER,
+                               command=lambda _v: self._mostrar_form_dia()).grid(
+            row=0, column=0, padx=(14, 6), pady=14)
+        self.dia_valor_var = tk.StringVar()
+        valor_entry = ctk.CTkEntry(form, textvariable=self.dia_valor_var, width=120,
+                                   placeholder_text="R$ 0,00", font=self.ft_normal)
+        valor_entry.grid(row=0, column=1, padx=6)
+        valor_entry.bind("<Return>", lambda e: self.adicionar_do_dia())
+        self._campo_dinheiro(valor_entry, self.dia_valor_var)
+        self.dia_opcao_var = tk.StringVar()
+        self.dia_opcao_menu = ctk.CTkOptionMenu(
+            form, variable=self.dia_opcao_var, values=[""], width=170,
+            font=self.ft_normal, fg_color=CARD, text_color=TEXTO,
+            command=lambda _v: self._mostrar_form_dia())
+        self.dia_opcao_menu.grid(row=0, column=2, padx=6)
+        self.dia_sub_var = tk.StringVar()  # banco/transporte (gasto) ou app (ganho)
+        self.dia_sub_menu = ctk.CTkOptionMenu(
+            form, variable=self.dia_sub_var, values=[""], width=150,
+            font=self.ft_normal, fg_color=CARD, text_color=TEXTO)
+        self.dia_sub_menu.grid(row=0, column=3, padx=6)
+        self.dia_cartao_var = tk.StringVar(value=CARTOES[0])
+        self.dia_cartao_menu = ctk.CTkOptionMenu(
+            form, variable=self.dia_cartao_var, values=CARTOES, width=150,
+            font=self.ft_normal, fg_color=CARD, text_color=TEXTO,
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER)
+        self.dia_cartao_menu.grid(row=0, column=4, padx=6)
+        self.btn_add_dia = ctk.CTkButton(form, text="➕  Adicionar", width=120,
+                                         font=self.ft_bold, command=self.adicionar_do_dia)
+        self.btn_add_dia.grid(row=0, column=5, sticky="e", padx=14)
+        self._mostrar_form_dia()
+
+        # ---- calendário à esquerda | resumo e lançamentos do dia à direita ----
+        corpo = ctk.CTkFrame(parent, fg_color="transparent")
+        corpo.pack(fill="both", expand=True)
+        corpo.columnconfigure(1, weight=1)
+        corpo.rowconfigure(0, weight=1)
+        self._montar_calendario(corpo)
+        direita = ctk.CTkFrame(corpo, fg_color="transparent")
+        direita.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self.dia_lbl = ctk.CTkLabel(direita, text="", font=self.ft_secao)
+        self.dia_lbl.pack(anchor="w", padx=4)
+        resumo = ctk.CTkFrame(direita, fg_color="transparent")
+        resumo.pack(fill="x")
+        resumo.columnconfigure(0, weight=1)
+        self.dia_tiles = self._montar_tiles(resumo, [
+            ("💸", "GASTOS DO DIA", COR_GASTO),
+            ("💵", "GANHOS DO DIA", COR_RENDA),
+            ("⚖️", "SALDO DO DIA", COR_POS),
+        ])
+
+        acoes = ctk.CTkFrame(direita, fg_color="transparent")
+        acoes.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(acoes, text="Lançamentos do dia", font=self.ft_secao).pack(
+            side="left", padx=4)
+        ctk.CTkButton(acoes, text="🗑  Remover selecionado", font=self.ft_bold,
+                      fg_color="transparent", text_color=COR_NEG, hover_color=CARD2,
+                      border_width=1, border_color=COR_NEG,
+                      command=self.remover_do_dia).pack(side="right", padx=4)
+
+        tabela = ctk.CTkFrame(direita, fg_color=CARD, corner_radius=12)
+        tabela.pack(fill="both", expand=True)
+        colunas = ("tipo", "descricao", "pagamento", "valor")
+        self.tree_dia = ttk.Treeview(tabela, columns=colunas, show="headings",
+                                     selectmode="browse")
+        for coluna, titulo, largura, ancora in (
+                ("tipo", "TIPO", 80, "center"), ("descricao", "DESCRIÇÃO", 240, "center"),
+                ("pagamento", "PAGAMENTO", 130, "center"), ("valor", "VALOR", 120, "e")):
+            self.tree_dia.heading(coluna, text=titulo)
+            self.tree_dia.column(coluna, width=largura, anchor=ancora)
+        self.tree_dia.tag_configure("g", foreground=COR_GASTO)
+        self.tree_dia.tag_configure("r", foreground=COR_RENDA)
+        scroll = ctk.CTkScrollbar(tabela, command=self.tree_dia.yview)
+        self.tree_dia.configure(yscrollcommand=scroll.set)
+        self.tree_dia.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+        scroll.pack(side="right", fill="y", padx=(0, 8), pady=10)
+
+    def _montar_calendario(self, parent):
+        """Calendário do mês com o ganho de cada dia; clicar num dia o escolhe."""
+        cal = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=12)
+        cal.grid(row=0, column=0, sticky="n")
+        topo = ctk.CTkFrame(cal, fg_color="transparent")
+        topo.pack(fill="x", padx=10, pady=(10, 4))
+        for texto, delta, lado in (("◀", -1, "left"), ("▶", 1, "right")):
+            ctk.CTkButton(topo, text=texto, width=32, font=self.ft_bold,
+                          fg_color="transparent", text_color=ACCENT, hover_color=CARD,
+                          command=lambda d=delta: self._ir_para_mes(d)).pack(side=lado)
+        ctk.CTkButton(topo, text="Hoje", width=50, font=self.ft_pequena,
+                      fg_color="transparent", text_color=SUB, hover_color=CARD,
+                      command=lambda: self._ir_para_dia(date.today())).pack(side="right")
+        self.cal_titulo = ctk.CTkLabel(topo, text="", font=self.ft_bold)
+        self.cal_titulo.pack(side="left", expand=True)
+
+        grade = ctk.CTkFrame(cal, fg_color="transparent")
+        grade.pack(padx=10)
+        for coluna, nome in enumerate(DIAS_SEMANA):
+            ctk.CTkLabel(grade, text=nome[:3], text_color=SUB, height=20,
+                         font=self.ft_rotulo).grid(row=0, column=coluna)
+        self._cal_num = [0] * 42  # dia do mês de cada botão (0 = fora do mês)
+        self.cal_dias = []
+        for i in range(42):
+            botao = ctk.CTkButton(grade, text="", width=62, height=40, corner_radius=8,
+                                  font=self.ft_pequena, border_color=ACCENT,
+                                  command=lambda i=i: self._ir_para_dia(
+                                      self.dia.replace(day=self._cal_num[i])))
+            botao.grid(row=1 + i // 7, column=i % 7, padx=2, pady=2)
+            self.cal_dias.append(botao)
+        self.cal_total = ctk.CTkLabel(cal, text="", text_color=SUB, font=self.ft_pequena)
+        self.cal_total.pack(pady=(4, 10))
+
+    def _atualizar_calendario(self, ganho_dia):
+        """Pinta cada dia de verde conforme o quanto rendeu (mais forte = ganhou mais)."""
+        ano, mes = self.dia.year, self.dia.month
+        self.cal_titulo.configure(text=f"{MESES_PT[mes - 1]} {ano}")
+        dias = [d for semana in calendar.monthcalendar(ano, mes) for d in semana]
+        self._cal_num = dias + [0] * (42 - len(dias))
+        maior = max(ganho_dia.values(), default=0)
+        fundo, verde = np.array(to_rgb(_cor(CARD))), np.array(to_rgb(COR_RENDA))
+        hoje = date.today()
+        for botao, dia in zip(self.cal_dias, self._cal_num):
+            if not dia:
+                botao.grid_remove()
+                continue
+            botao.grid()
+            ganho = ganho_dia.get(dia, 0.0)
+            if dia == self.dia.day:
+                cor, texto = ACCENT, "white"
+            elif ganho > 0:
+                forca = 0.25 + 0.75 * ganho / maior
+                cor = mpl.colors.to_hex(fundo + (verde - fundo) * forca)
+                texto = "white" if forca > 0.6 else _cor(TEXTO)
+            else:
+                cor, texto = _cor(CARD), _cor(SUB)
+            valor = "+" + formatar_numero(ganho)[:-3] if ganho else ""  # sem centavos
+            botao.configure(text=f"{dia}\n{valor}", fg_color=cor, hover_color=ACCENT_HOVER,
+                            text_color=texto,
+                            border_width=2 if date(ano, mes, dia) == hoje else 0)
+        total = sum(ganho_dia.values())
+        melhor = max(ganho_dia, key=ganho_dia.get) if total else None
+        self.cal_total.configure(
+            text=f"Ganhos no mês: {formatar_moeda(total)}"
+            + (f"  ·  melhor dia: {melhor} ({formatar_moeda(ganho_dia[melhor])})"
+               if melhor else ""))
+
+    def _mostrar_form_dia(self):
+        """Gasto: categoria (+ banco/transporte) e pagamento; ganho: fonte (+ app)."""
+        gasto = self.dia_tipo.get() == "Gasto"
+        opcoes = CATEGORIAS_DIA if gasto else FONTES_RENDA
+        if self.dia_opcao_var.get() not in opcoes:
+            self.dia_opcao_var.set(opcoes[0])
+        escolha = self.dia_opcao_var.get()
+        cor, hover = (ACCENT, ACCENT_HOVER) if gasto else (COR_RENDA, COR_RENDA_HOVER)
+        self.dia_opcao_menu.configure(values=opcoes, button_color=cor,
+                                      button_hover_color=hover)
+        self.btn_add_dia.configure(fg_color=cor, hover_color=hover)
+        subs = self._subopcoes_dia()
+        if subs:
+            if self.dia_sub_var.get() not in subs:
+                self.dia_sub_var.set(next(iter(subs)))
+            self.dia_sub_menu.configure(values=list(subs), button_color=cor,
+                                        button_hover_color=hover)
+            self.dia_sub_menu.grid()
+        else:
+            self.dia_sub_menu.grid_remove()
+        self.dia_cartao_menu.grid() if gasto else self.dia_cartao_menu.grid_remove()
+
+    def _subopcoes_dia(self):
+        """Opções do 2º seletor do Diário para a escolha atual, ou None."""
+        escolha = self.dia_opcao_var.get()
+        if self.dia_tipo.get() == "Gasto":
+            return SUBCATEGORIAS[escolha][2] if escolha in SUBCATEGORIAS else None
+        return APPS_DELIVERY if escolha == FONTE_DELIVERY else None
+
+    def _ir_para_dia(self, dia):
+        self.dia = dia
+        if dia.strftime("%Y-%m") != self.mes_atual:  # cards do topo seguem o mês do dia
+            self.mes_atual = dia.strftime("%Y-%m")
+            self._sincronizar_mes()
+        else:
+            self._atualizar_diario()
+
+    def adicionar_do_dia(self):
+        valor = self._parse_valor(self.dia_valor_var.get())
+        if valor is None or valor <= 0:
+            self._toast("Informe um valor maior que zero.", "erro")
+            return
+        escolha = self.dia_opcao_var.get()
+        sub = self.dia_sub_var.get() if self._subopcoes_dia() else None
+        item = {"data": self.dia.strftime("%d/%m/%Y"), "valor": valor}
+        if self.dia_tipo.get() == "Gasto":
+            item.update(categoria=escolha, cartao=self.dia_cartao_var.get())
+            if sub:
+                item["instituicao"] = sub
+            item["descricao"] = rotulo_categoria(item)
+            self.gastos.append(item)
+        else:
+            item.update(descricao=sub or escolha, fonte=escolha)
+            if sub:
+                item["app"] = sub
+            self.rendas.append(item)
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self.dia_valor_var.set("")
+        self._preencher_renda()
+        self._atualizar_tudo()
+        self._toast(f"{self.dia_tipo.get()} de {formatar_moeda(valor)} lançado em "
+                    f"{item['data']}.", "sucesso")
+
+    def remover_do_dia(self):
+        selecao = self.tree_dia.selection()
+        if not selecao:
+            self._toast("Selecione um lançamento para remover.", "info")
+            return
+        tipo, indice = selecao[0].split("_")
+        lista = self.gastos if tipo == "g" else self.rendas
+        item = lista[int(indice)]
+        if item.get("compra"):
+            self._toast("Parcelas se removem na aba Lançamentos.", "info")
+            return
+        if not self._confirmar("Remover lançamento",
+                               f"Remover '{item.get('descricao') or item.get('fonte')}' "
+                               f"({formatar_moeda(item['valor'])})?"):
+            return
+        self._cancelar_edicao()  # os índices mudam
+        del lista[int(indice)]
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._preencher_renda()
+        self._atualizar_tudo()
+        self._toast("Lançamento removido.", "sucesso")
+
+    def _atualizar_diario(self):
+        self.dia_lbl.configure(
+            text=f"{DIAS_SEMANA[self.dia.weekday()]}, {self.dia.strftime('%d/%m/%Y')}")
+        mes = self.dia.strftime("%Y-%m")
+        do_mes = [("g", i, g) for i, g in enumerate(self.gastos) if mes_do_gasto(g) == mes] + \
+                 [("r", i, r) for i, r in enumerate(self.rendas) if mes_do_gasto(r) == mes]
+        do_dia = [x for x in do_mes if dia_de_data(x[2]["data"]) == self.dia.day]
+        ganho_dia = {}
+        for tipo, _indice, item in do_mes:
+            if tipo == "r":
+                dia = dia_de_data(item["data"])
+                ganho_dia[dia] = ganho_dia.get(dia, 0.0) + item["valor"]
+        self._atualizar_calendario(ganho_dia)
+
+        self.tree_dia.delete(*self.tree_dia.get_children())
+        for tipo, indice, item in do_dia:
+            gasto = tipo == "g"
+            self.tree_dia.insert("", "end", iid=f"{tipo}_{indice}", tags=(tipo,), values=(
+                "Gasto" if gasto else "Ganho",
+                item.get("descricao") or item.get("app") or item.get("fonte", FONTE_PADRAO),
+                item.get("cartao", CARTAO_PADRAO) if gasto else "—",
+                ("− " if gasto else "+ ") + formatar_moeda(item["valor"])))
+
+        def saldo(itens):
+            gastos = sum(x[2]["valor"] for x in itens if x[0] == "g")
+            ganhos = sum(x[2]["valor"] for x in itens if x[0] == "r")
+            return gastos, ganhos, ganhos - gastos
+
+        gastos, ganhos, saldo_dia = saldo(do_dia)
+        saldo_mes = saldo([x for x in do_mes if dia_de_data(x[2]["data"]) <= self.dia.day])[2]
+        n_g = sum(x[0] == "g" for x in do_dia)
+        dados = [(gastos, f"{n_g} lançamento(s)"),
+                 (ganhos, f"{len(do_dia) - n_g} lançamento(s)"),
+                 (saldo_dia, f"no mês até o dia: {formatar_moeda(saldo_mes)}")]
+        for (valor_lbl, legenda), (valor, texto) in zip(self.dia_tiles, dados):
+            valor_lbl.configure(text=formatar_moeda(valor))
+            legenda.configure(text=texto)
+        self.dia_tiles[2][0].configure(text_color=COR_POS if saldo_dia >= 0 else COR_NEG)
 
     def _montar_aba_graficos(self, parent):
         parent.configure(fg_color="transparent")
@@ -2175,6 +2464,7 @@ class CalculadorApp:
     # ---------------------------------------------------------- atualização ---
     def _atualizar_tudo(self):
         self._atualizar_lista()
+        self._atualizar_diario()
         self._atualizar_progresso()
         self._atualizar_graficos()
         self._atualizar_evolucao()
