@@ -1228,19 +1228,19 @@ class CalculadorApp:
                                       segmented_button_selected_color=ACCENT,
                                       segmented_button_selected_hover_color=ACCENT_HOVER)
         self.tabview.pack(fill="both", expand=True, pady=(6, 0))
+        self.tabview.add("Assistente")
         self.tabview.add("Lançamentos")
         self.tabview.add("Diário")
         self.tabview.add("Gráficos do mês")
         self.tabview.add("Evolução")
         self.tabview.add("Reserva e Investimentos")
-        self.tabview.add("Assistente")
 
+        self._montar_aba_assistente(self.tabview.tab("Assistente"))
         self._montar_aba_lancamentos(self.tabview.tab("Lançamentos"))
         self._montar_aba_diario(self.tabview.tab("Diário"))
         self._montar_aba_graficos(self.tabview.tab("Gráficos do mês"))
         self._montar_aba_evolucao(self.tabview.tab("Evolução"))
         self._montar_aba_poupancas(self.tabview.tab("Reserva e Investimentos"))
-        self._montar_aba_assistente(self.tabview.tab("Assistente"))
 
     def _montar_header(self):
         header = ctk.CTkFrame(self.root, fg_color=ACCENT, corner_radius=0, height=76)
