@@ -19,8 +19,10 @@ def test_ida_e_volta():
     _usar_arquivo_temporario()
     rendas = [{"data": "10/09/2026", "descricao": "Site",
                "fonte": "Freelance", "valor": 800.0}]
-    c.salvar_dados({"2026-09": 3000.0}, [], rendas)
-    orcamentos, gastos, lidas = c.carregar_dados()
+    caixinhas = [{"nome": "Viagem", "meta": 3000.0}]
+    c.salvar_dados({"2026-09": 3000.0}, [], rendas, caixinhas)
+    orcamentos, gastos, lidas, caixinhas_lidas = c.carregar_dados()
+    assert caixinhas_lidas == caixinhas
     assert orcamentos == {"2026-09": 3000.0}
     assert gastos == []
     assert lidas == rendas
@@ -34,22 +36,23 @@ def test_formatos_antigos_sem_rendas():
     # formato antigo: lista pura de gastos
     with open(caminho, "w", encoding="utf-8") as f:
         json.dump([gasto], f)
-    assert c.carregar_dados() == ({}, [gasto], [])
+    assert c.carregar_dados() == ({}, [gasto], [], [])
 
     # formato anterior: orçamento único, aplicado ao mês do gasto
     with open(caminho, "w", encoding="utf-8") as f:
         json.dump({"orcamento": 2500.0, "gastos": [gasto]}, f)
-    orcamentos, gastos, rendas = c.carregar_dados()
+    orcamentos, gastos, rendas, caixinhas = c.carregar_dados()
+    assert caixinhas == []  # arquivo antigo, sem caixinhas
     assert orcamentos == {"2026-08": 2500.0}
     assert gastos == [gasto] and rendas == []
 
 
 def test_arquivo_ausente_ou_corrompido():
     caminho = _usar_arquivo_temporario()
-    assert c.carregar_dados() == ({}, [], [])
+    assert c.carregar_dados() == ({}, [], [], [])
     with open(caminho, "w", encoding="utf-8") as f:
         f.write("{ isso não é json")
-    assert c.carregar_dados() == ({}, [], [])
+    assert c.carregar_dados() == ({}, [], [], [])
 
 
 def test_fatura_por_instituicao():
@@ -340,9 +343,31 @@ def test_assistente_perguntas_nao_apagam():
     nomes = lambda texto: {f["function"]["name"] for f in c.ferramentas_para(texto)}
     assert nomes("quanto sobrou?") == {"mudar_mes", "copiar_contas_fixas"}
     assert "lancar" in nomes("fiz 250 no ifood") and "remover" in nomes("apaga o uber")
+    assert "criar_caixinha" in nomes("cria uma caixinha viagem")
+    cx = [{"nome": "Viagem"}]
+    nomes_cx = lambda texto: {f["function"]["name"] for f in c.ferramentas_para(texto, cx)}
+    assert "renomear_caixinha" in nomes_cx("renomeia viagem pra ferias")
+    for pergunta in ("quanto tenho nas caixinhas?", "quanto falta pra meta da viagem?"):
+        assert nomes_cx(pergunta) == {"mudar_mes", "copiar_contas_fixas"}, pergunta
+
+
+def test_caixinhas():
+    caixinhas = [{"nome": "Viagem", "meta": 3000.0}, {"nome": "Carro", "meta": 0}]
+    gastos = [c.movimento_caixinha("Viagem", 500.0, True, "05/09/2026"),
+              c.movimento_caixinha("Viagem", 200.0, True, "10/10/2026"),
+              {"data": "05/09/2026", "categoria": "Luz", "valor": 90.0}]
+    rendas = [c.movimento_caixinha("Viagem", 150.0, False, "12/10/2026"),
+              c.movimento_caixinha("Sumiu", 1.0, False, "12/10/2026")]  # sem caixinha: ignora
+    assert c.saldos_caixinhas(caixinhas, gastos, rendas) == {"Viagem": 550.0, "Carro": 0.0}
+    assert gastos[0]["categoria"] == "Caixinhas" and rendas[0]["fonte"] == "Resgate de Caixinha"
+    assert c.nome_de_caixinha("  Casa   nova ", caixinhas) == ("Casa nova", None)
+    assert c.nome_de_caixinha("viágem", caixinhas)[1]  # já existe (sem ligar p/ acento)
+    assert c.nome_de_caixinha("VIAGEM", caixinhas, atual="Viagem") == ("VIAGEM", None)
+    assert c.nome_de_caixinha("   ", caixinhas)[1]
 
 
 if __name__ == "__main__":
+    test_caixinhas()
     test_achar_lancamentos()
     test_assistente_perguntas_nao_apagam()
     test_lancamento_do_assistente()

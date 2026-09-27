@@ -125,6 +125,12 @@ POUPANCAS = {
     "investimentos": ("Investimentos", "Resgate de Investimentos"),
 }
 
+# Caixinhas (objetivos com nome): guardar é um gasto na categoria, retirar é uma
+# renda na fonte, os dois com "caixinha": nome. O saldo é a soma, como na reserva.
+CATEGORIA_CAIXINHA = "Caixinhas"
+FONTE_CAIXINHA = "Resgate de Caixinha"
+CATEGORIA_CORES[CATEGORIA_CAIXINHA] = "#FACC15"
+
 # Compras parceladas: cada parcela é um gasto no seu mês (ver distribuir_parcelas)
 CATEGORIA_PARCELAMENTO = "Parcelamento de Compras"
 OUTRA_QUANTIDADE = "Outra…"
@@ -355,30 +361,31 @@ def mes_atual_chave():
 
 
 def carregar_dados():
-    """Lê os orçamentos (por mês), os gastos e as rendas extras do JSON.
+    """Lê os orçamentos (por mês), os gastos, as rendas extras e as caixinhas do JSON.
 
     Aceita vários formatos, garantindo compatibilidade:
     - novo: {"orcamentos": {...}, "gastos": [...], "rendas": [...]}
     - anterior: {"orcamento": valor_único, "gastos": [...]}
     - antigo: apenas uma lista de gastos.
-    Retorna (orcamentos: dict, gastos: list, rendas: list).
+    Retorna (orcamentos: dict, gastos: list, rendas: list, caixinhas: list).
     """
     if not os.path.exists(DATA_FILE):
-        return {}, [], []
+        return {}, [], [], []
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             dados = json.load(f)
     except (json.JSONDecodeError, OSError):
-        return {}, [], []
+        return {}, [], [], []
 
     if isinstance(dados, list):  # formato antigo (lista pura)
-        return {}, dados, []
+        return {}, dados, [], []
 
     gastos = dados.get("gastos", [])
     rendas = dados.get("rendas", [])
+    caixinhas = dados.get("caixinhas", [])
     if "orcamentos" in dados:  # formato novo (por mês)
         orcamentos = {k: float(v) for k, v in dados["orcamentos"].items()}
-        return orcamentos, gastos, rendas
+        return orcamentos, gastos, rendas, caixinhas
 
     # formato anterior (orçamento único) -> aplica o valor a cada mês existente
     orcamentos = {}
@@ -387,14 +394,15 @@ def carregar_dados():
         for gasto in gastos:
             chave = mes_do_gasto(gasto) or mes_atual_chave()
             orcamentos[chave] = valor
-    return orcamentos, gastos, rendas
+    return orcamentos, gastos, rendas, caixinhas
 
 
-def salvar_dados(orcamentos, gastos, rendas):
-    """Grava orçamentos por mês, gastos e rendas extras no arquivo JSON."""
+def salvar_dados(orcamentos, gastos, rendas, caixinhas):
+    """Grava orçamentos por mês, gastos, rendas extras e caixinhas no arquivo JSON."""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(
-            {"orcamentos": orcamentos, "gastos": gastos, "rendas": rendas},
+            {"orcamentos": orcamentos, "gastos": gastos, "rendas": rendas,
+             "caixinhas": caixinhas},
             f,
             ensure_ascii=False,
             indent=2,
@@ -711,6 +719,37 @@ def e_conta_fixa(gasto):
     return gasto["categoria"] in CONTAS_FIXAS and not gasto.get("compra")
 
 
+def saldos_caixinhas(caixinhas, gastos, rendas):
+    """{nome: guardado - retirado} de cada caixinha, na ordem em que foram criadas."""
+    saldos = {cx["nome"]: 0.0 for cx in caixinhas}
+    for item, sinal in [(g, 1) for g in gastos] + [(r, -1) for r in rendas]:
+        if item.get("caixinha") in saldos:
+            saldos[item["caixinha"]] += sinal * item["valor"]
+    return saldos
+
+
+def nome_de_caixinha(nome, caixinhas, atual=None):
+    """(nome limpo, None) se puder usar, ou (None, erro). Não repete nome, sem
+    ligar para maiúsculas/acentos; `atual` é o nome da caixinha sendo renomeada."""
+    nome = " ".join(str(nome or "").split())[:40]
+    if not nome:
+        return None, "Erro: dê um nome para a caixinha."
+    if any(_chave(cx["nome"]) == _chave(nome) and cx["nome"] != atual for cx in caixinhas):
+        return None, f"Erro: já existe uma caixinha chamada {nome}."
+    return nome, None
+
+
+def movimento_caixinha(nome, valor, guardar, data_texto):
+    """Guardar: gasto na categoria Caixinhas; retirar: renda de resgate."""
+    item = {"data": data_texto, "valor": valor, "caixinha": nome,
+            "descricao": f"Caixinha {nome}"}
+    if guardar:
+        item.update(categoria=CATEGORIA_CAIXINHA, cartao=CARTAO_PADRAO)
+    else:
+        item["fonte"] = FONTE_CAIXINHA
+    return item
+
+
 def distribuir_parcelas(gastos):
     """Cria, nos meses seguintes, as parcelas que faltam de cada compra/empréstimo.
 
@@ -842,7 +881,28 @@ FERRAMENTAS = [
                 {"mes": {"type": "string", "description": "mm/aaaa"}}, ["mes"]),
     _ferramenta("copiar_contas_fixas", "Abre a janela do app que copia as contas fixas "
                 "(aluguel, luz...) de um mês para outro e lança parcelas futuras."),
+    _ferramenta("criar_caixinha", "Cria uma caixinha (objetivo com nome, ex.: Viagem), "
+                "com meta e primeiro valor guardado opcionais.",
+                {"nome": {"type": "string"},
+                 "meta": {"type": "number", "description": "meta em reais; omita se não houver"},
+                 "guardar": {"type": "number", "description":
+                             "valor para já guardar nela; omita se o usuário não disse"}},
+                ["nome"]),
+    _ferramenta("caixinha", "Guarda dinheiro numa caixinha ou retira dela. Não use lancar "
+                "para caixinha.",
+                {"acao": {"type": "string", "enum": ["guardar", "retirar"]},
+                 "nome": {"type": "string", "description": "nome da caixinha"},
+                 "valor": {"type": "number"}}, ["acao", "nome", "valor"]),
+    _ferramenta("renomear_caixinha", "Troca o nome de uma caixinha.",
+                {"nome": {"type": "string"}, "novo_nome": {"type": "string"}},
+                ["nome", "novo_nome"]),
+    _ferramenta("excluir_caixinha", "Exclui uma caixinha vazia (o app pede confirmação).",
+                {"nome": {"type": "string"}}, ["nome"]),
 ]
+# pedidos que não trazem valor: só são oferecidos se o texto pedir (senão o
+# modelo "responde" a uma pergunta renomeando a caixinha para o mesmo nome)
+PEDE_CRIAR = ("cri", "abre", "abrir", "abra", "nova", "novo", "faz", "faca", "fazer")
+PEDE_RENOMEAR = ("renome", "nome", "chama")
 
 
 def _chave(texto):
@@ -850,14 +910,21 @@ def _chave(texto):
     return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().casefold().strip()
 
 
-def ferramentas_para(texto):
-    """Só oferece ao modelo o que pode passar nas checagens: lançar e salário
-    pedem um valor escrito, limpar e remover pedem "apagar". Numa pergunta sobram
-    mudar_mes e copiar_contas_fixas, e o modelo responde com texto."""
+def ferramentas_para(texto, caixinhas=()):
+    """Só oferece ao modelo o que pode passar nas checagens: lançar, salário e
+    guardar pedem um valor escrito; limpar, remover e excluir pedem "apagar". Numa
+    pergunta sobram mudar_mes e copiar_contas_fixas (e criar/renomear caixinha, se
+    ela for citada), e o modelo responde com texto."""
     if numeros_do_texto(texto) or pede_para_apagar(texto):
         return FERRAMENTAS
-    return [f for f in FERRAMENTAS
-            if f["function"]["name"] in ("mudar_mes", "copiar_contas_fixas")]
+    nomes = {"mudar_mes", "copiar_contas_fixas"}
+    chave = _chave(texto)
+    if "caixinh" in chave and any(p in chave for p in PEDE_CRIAR):
+        nomes.add("criar_caixinha")
+    citou = "caixinh" in chave or any(_chave(cx["nome"]) in chave for cx in caixinhas)
+    if citou and any(p in chave for p in PEDE_RENOMEAR):
+        nomes.add("renomear_caixinha")
+    return [f for f in FERRAMENTAS if f["function"]["name"] in nomes]
 
 
 def _achar(texto, opcoes):
@@ -1070,7 +1137,8 @@ class CalculadorApp:
         self.root.geometry("1080x980")
         self.root.minsize(940, 800)
 
-        self.orcamentos, self.gastos, self.rendas = carregar_dados()
+        self.orcamentos, self.gastos, self.rendas, self.caixinhas = carregar_dados()
+        self._caixinhas_nos_cards = None  # (nome, meta) desenhados; ver _atualizar_caixinhas
         self.mes_atual = mes_atual_chave()
         self.dia = date.today()  # dia exibido na aba Diário
         self._popup_mes = None
@@ -1385,6 +1453,7 @@ class CalculadorApp:
         self.tabview.add("Assistente")
         self.tabview.add("Lançamentos")
         self.tabview.add("Diário")
+        self.tabview.add("Caixinhas")
         self.tabview.add("Gráficos do mês")
         self.tabview.add("Evolução")
         self.tabview.add("Reserva e Investimentos")
@@ -1392,6 +1461,7 @@ class CalculadorApp:
         self._montar_aba_assistente(self.tabview.tab("Assistente"))
         self._montar_aba_lancamentos(self.tabview.tab("Lançamentos"))
         self._montar_aba_diario(self.tabview.tab("Diário"))
+        self._montar_aba_caixinhas(self.tabview.tab("Caixinhas"))
         self._montar_aba_graficos(self.tabview.tab("Gráficos do mês"))
         self._montar_aba_evolucao(self.tabview.tab("Evolução"))
         self._montar_aba_poupancas(self.tabview.tab("Reserva e Investimentos"))
@@ -2104,7 +2174,7 @@ class CalculadorApp:
 
     def _guardar_lancamento(self, gasto, item):
         (self.gastos if gasto else self.rendas).append(item)
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._preencher_renda()
         self._atualizar_tudo()
 
@@ -2125,7 +2195,7 @@ class CalculadorApp:
             return
         self._cancelar_edicao()  # os índices mudam
         del lista[int(indice)]
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._preencher_renda()
         self._atualizar_tudo()
         self._toast("Lançamento removido.", "sucesso")
@@ -2168,6 +2238,182 @@ class CalculadorApp:
             valor_lbl.configure(text=formatar_moeda(valor))
             legenda.configure(text=texto)
         self.dia_tiles[2][0].configure(text_color=COR_POS if saldo_dia >= 0 else COR_NEG)
+
+    def _montar_aba_caixinhas(self, parent):
+        """Caixinhas com nome e meta: guardar e retirar dinheiro para objetivos."""
+        parent.configure(fg_color="transparent")
+        form = ctk.CTkFrame(parent, fg_color=CARD2, corner_radius=12)
+        form.pack(fill="x", pady=(6, 10))
+        ctk.CTkLabel(form, text="🐷  Nova caixinha", font=self.ft_secao).pack(
+            side="left", padx=(16, 10), pady=14)
+        self.cx_nome_var, self.cx_meta_var = tk.StringVar(), tk.StringVar()
+        nome = ctk.CTkEntry(form, textvariable=self.cx_nome_var, width=200,
+                            font=self.ft_normal, placeholder_text="Nome (ex.: Viagem)")
+        nome.pack(side="left", padx=4)
+        meta = ctk.CTkEntry(form, textvariable=self.cx_meta_var, width=140,
+                            font=self.ft_normal, placeholder_text="Meta R$ (opcional)")
+        meta.pack(side="left", padx=4)
+        self._campo_dinheiro(meta, self.cx_meta_var)
+        for entrada in (nome, meta):
+            entrada.bind("<Return>", lambda e: self._criar_caixinha_ui())
+        ctk.CTkButton(form, text="➕  Criar", width=100, font=self.ft_bold, fg_color=ACCENT,
+                      hover_color=ACCENT_HOVER, command=self._criar_caixinha_ui).pack(
+            side="left", padx=8)
+        self.cx_total = ctk.CTkLabel(form, text="", font=self.ft_bold,
+                                     text_color=CATEGORIA_CORES[CATEGORIA_CAIXINHA])
+        self.cx_total.pack(side="right", padx=16)
+        self.cx_lista = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        self.cx_lista.pack(fill="both", expand=True)
+        self.cx_cards = {}  # nome -> (rótulo do valor, barra, rótulo da porcentagem)
+
+    def _atualizar_caixinhas(self):
+        saldos = saldos_caixinhas(self.caixinhas, self.gastos, self.rendas)
+        self.cx_total.configure(text=f"Guardado: {formatar_moeda(sum(saldos.values()))}")
+        # recria os cards só se as caixinhas mudarem (criar, renomear, excluir);
+        # guardar/retirar só atualiza o texto e a barra
+        desenhadas = tuple((cx["nome"], cx.get("meta", 0)) for cx in self.caixinhas)
+        if desenhadas != self._caixinhas_nos_cards:
+            self._caixinhas_nos_cards = desenhadas
+            for card in self.cx_lista.winfo_children():
+                card.destroy()
+            self.cx_cards = {}
+            if not self.caixinhas:
+                ctk.CTkLabel(self.cx_lista, text="Nenhuma caixinha ainda. Crie uma acima ou "
+                             "peça ao assistente: \"cria uma caixinha viagem com meta de "
+                             "3000\".", text_color=SUB, font=self.ft_normal).pack(pady=30)
+            for cx in self.caixinhas:
+                self.cx_cards[cx["nome"]] = self._card_caixinha(cx)
+        for cx in self.caixinhas:
+            valor, barra, pct = self.cx_cards[cx["nome"]]
+            saldo, meta = saldos[cx["nome"]], cx.get("meta", 0)
+            valor.configure(text=formatar_moeda(saldo)
+                            + (f" de {formatar_moeda(meta)}" if meta else ""))
+            if meta:
+                barra.set(max(0, min(saldo / meta, 1)))
+                barra.configure(progress_color=COR_POS if saldo >= meta else ACCENT)
+                pct.configure(text="Meta batida! 🎉" if saldo >= meta
+                              else f"{saldo / meta * 100:.0f}% da meta")
+
+    def _card_caixinha(self, cx):
+        nome = cx["nome"]
+        card = ctk.CTkFrame(self.cx_lista, fg_color=CARD2, corner_radius=12)
+        card.pack(fill="x", pady=4, padx=2)
+        topo = ctk.CTkFrame(card, fg_color="transparent")
+        topo.pack(fill="x", padx=16, pady=(12, 4))
+        ctk.CTkLabel(topo, text=f"🐷  {nome}", font=self.ft_secao).pack(side="left")
+        valor = ctk.CTkLabel(topo, text="", font=self.ft_valor_pq,
+                             text_color=CATEGORIA_CORES[CATEGORIA_CAIXINHA])
+        valor.pack(side="right")
+        barra = pct = None
+        if cx.get("meta"):
+            barra = ctk.CTkProgressBar(card, height=10, corner_radius=6)
+            barra.pack(fill="x", padx=16, pady=(0, 2))
+            pct = ctk.CTkLabel(card, text="", text_color=SUB, font=self.ft_pequena)
+            pct.pack(anchor="w", padx=16)
+        acoes = ctk.CTkFrame(card, fg_color="transparent")
+        acoes.pack(fill="x", padx=16, pady=(4, 12))
+        var = tk.StringVar()
+        entrada = ctk.CTkEntry(acoes, textvariable=var, width=120, font=self.ft_normal,
+                               placeholder_text="R$ 0,00")
+        entrada.pack(side="left")
+        self._campo_dinheiro(entrada, var)
+        for texto, guardar, cor, hover in (("Guardar", True, COR_RENDA, COR_RENDA_HOVER),
+                                           ("Retirar", False, COR_GASTO, "#D97706")):
+            ctk.CTkButton(acoes, text=texto, width=90, font=self.ft_bold, fg_color=cor,
+                          hover_color=hover, command=lambda g=guardar: self._movimentar_ui(
+                              nome, var, g)).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(acoes, text="🗑  Excluir", width=90, font=self.ft_pequena,
+                      fg_color="transparent", text_color=COR_NEG, hover_color=CARD,
+                      command=lambda: self._toast_resultado(self.excluir_caixinha(nome))
+                      ).pack(side="right")
+        ctk.CTkButton(acoes, text="✏️  Renomear", width=100, font=self.ft_pequena,
+                      fg_color="transparent", text_color=ACCENT, hover_color=CARD,
+                      command=lambda: self._renomear_ui(nome)).pack(side="right", padx=4)
+        return valor, barra, pct
+
+    def _toast_resultado(self, resultado):
+        ok, mensagem = resultado
+        self._toast(mensagem.removeprefix("Erro: "), "sucesso" if ok else "erro")
+
+    def _criar_caixinha_ui(self):
+        meta = self._parse_valor(self.cx_meta_var.get() or "0") or 0.0
+        ok, mensagem = self.criar_caixinha(self.cx_nome_var.get(), meta)
+        self._toast_resultado((ok, mensagem))
+        if ok:
+            self.cx_nome_var.set("")
+            self.cx_meta_var.set("")
+
+    def _movimentar_ui(self, nome, var, guardar):
+        valor = self._parse_valor(var.get())
+        if not valor or valor <= 0:
+            self._toast("Informe um valor maior que zero.", "erro")
+            return
+        ok, mensagem = self.movimentar_caixinha(nome, valor, guardar)
+        self._toast_resultado((ok, mensagem))
+        if ok:
+            var.set("")
+
+    def _renomear_ui(self, nome):
+        novo = ctk.CTkInputDialog(title="Renomear caixinha",
+                                  text=f"Novo nome para a caixinha {nome}:").get_input()
+        if novo is not None:
+            self._toast_resultado(self.renomear_caixinha(nome, novo))
+
+    # ---- ações das caixinhas (usadas pela aba e pelo assistente) ----
+    # devolvem (ok, mensagem); erros começam com "Erro:" (o modelo lê e corrige)
+    def criar_caixinha(self, nome, meta=0.0):
+        nome, erro = nome_de_caixinha(nome, self.caixinhas)
+        if erro:
+            return False, erro
+        self.caixinhas.append({"nome": nome, "meta": meta})
+        self._salvar()
+        self._atualizar_caixinhas()
+        extra = f" com meta de {formatar_moeda(meta)}" if meta else ""
+        return True, f"Caixinha {nome} criada{extra}."
+
+    def movimentar_caixinha(self, nome, valor, guardar):
+        saldo = saldos_caixinhas(self.caixinhas, self.gastos, self.rendas).get(nome)
+        if saldo is None:
+            return False, f"Erro: não existe a caixinha {nome}."
+        if not guardar and valor > saldo + 0.005:
+            return False, f"Erro: a caixinha {nome} só tem {formatar_moeda(saldo)}."
+        item = movimento_caixinha(nome, valor, guardar, date.today().strftime("%d/%m/%Y"))
+        (self.gastos if guardar else self.rendas).append(item)
+        self._salvar()
+        self._preencher_renda()
+        self._atualizar_tudo()
+        acao = "Guardado" if guardar else "Retirado"
+        return True, f"{acao} {formatar_moeda(valor)} {'na' if guardar else 'da'} caixinha {nome}."
+
+    def renomear_caixinha(self, nome, novo):
+        novo, erro = nome_de_caixinha(novo, self.caixinhas, atual=nome)
+        if erro:
+            return False, erro
+        if novo == nome:
+            return False, "Erro: o nome novo é igual ao atual."
+        for cx in self.caixinhas:
+            if cx["nome"] == nome:
+                cx["nome"] = novo
+        for item in self.gastos + self.rendas:
+            if item.get("caixinha") == nome:
+                item.update(caixinha=novo, descricao=f"Caixinha {novo}")
+        self._salvar()
+        self._atualizar_tudo()
+        return True, f"Caixinha {nome} agora se chama {novo}."
+
+    def excluir_caixinha(self, nome):
+        saldo = saldos_caixinhas(self.caixinhas, self.gastos, self.rendas).get(nome)
+        if saldo is None:
+            return False, f"Erro: não existe a caixinha {nome}."
+        if abs(saldo) >= 0.005:  # o dinheiro não some: retira antes
+            return False, (f"Erro: retire os {formatar_moeda(saldo)} da caixinha {nome} "
+                           "antes de excluir.")
+        if not self._confirmar("Excluir caixinha", f"Excluir a caixinha {nome}?"):
+            return True, "Cancelado: nada foi apagado."
+        self.caixinhas = [cx for cx in self.caixinhas if cx["nome"] != nome]
+        self._salvar()
+        self._atualizar_caixinhas()
+        return True, f"Caixinha {nome} excluída."
 
     def _montar_aba_assistente(self, parent):
         """Chat com um modelo local do Ollama que conhece seus dados e lança gastos/ganhos."""
@@ -2215,7 +2461,10 @@ class CalculadorApp:
             "o usuário contar um gasto ou ganho novo (ex.: \"gastei 20 no mercado\"); "
             "depois confirme em uma frase. Para salário use a ferramenta salario; para "
             "apagar tudo de um mês, limpar; para apagar um lançamento, remover (só se o "
-            "usuário pedir para apagar); para perguntas sobre outro mês, mudar_mes. Se "
+            "usuário pedir para apagar); para perguntas sobre outro mês, mudar_mes. "
+            "Caixinhas são objetivos com nome (ex.: Viagem): criar_caixinha, caixinha "
+            "(guardar/retirar; nunca lancar), renomear_caixinha e excluir_caixinha; criar "
+            "caixinha não pede valor (a meta é opcional). Se "
             "faltar o valor, pergunte antes. O usuário escreve em português informal do "
             "Brasil, muitas vezes sem acentos, com abreviações e erros de digitação (ex.: "
             "\"salario\", \"alimentacao\", \"vc\", \"q\", \"merc\", \"2k\"): entenda o "
@@ -2255,6 +2504,11 @@ class CalculadorApp:
         linhas.append(f"Esta semana ({inicio:%d/%m} a {hoje:%d/%m}): ganhos "
                       f"{formatar_moeda(sum(ganhos_dia.get(d, 0) for d in semana))}, gastos "
                       f"{formatar_moeda(sum(gastos_dia.get(d, 0) for d in semana))}.")
+        saldos = saldos_caixinhas(self.caixinhas, self.gastos, self.rendas)
+        secao("Caixinhas (saldo | meta):",
+              [f"- {cx['nome']}: {formatar_moeda(saldos[cx['nome']])} | "
+               + (formatar_moeda(cx["meta"]) if cx.get("meta") else "sem meta")
+               for cx in self.caixinhas])
         secao(f"Lançamentos de {mes}:",
               [f"- {g['data']} gasto {rotulo_categoria(g)} ({g.get('cartao', CARTAO_PADRAO)})"
                f" {formatar_moeda(g['valor'])}" for g in self.gastos_do_mes()]
@@ -2277,8 +2531,9 @@ class CalculadorApp:
     def _pedir_ollama(self, rodadas):
         """Chama o Ollama numa thread (a janela não trava) e espera a resposta."""
         self.btn_chat.configure(state="disabled", text="Pensando…")
-        corpo = {"model": OLLAMA_MODELO, "stream": False,
-                 "tools": ferramentas_para(self.chat_msgs[0]["content"]),
+        ferramentas = ferramentas_para(self.chat_msgs[0]["content"], self.caixinhas)
+        self._oferecidas = {f["function"]["name"] for f in ferramentas}
+        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": ferramentas,
                  "messages": [{"role": "system", "content": self._contexto_assistente()}]
                  + self.chat_msgs}
         fila = queue.Queue()
@@ -2310,7 +2565,7 @@ class CalculadorApp:
                 return False, resultado
             mes, valor = resultado
             self.orcamentos[mes] = valor
-            salvar_dados(self.orcamentos, self.gastos, self.rendas)
+            self._salvar()
             self._sincronizar_mes()  # campo Salário e cards
             return True, f"Salário de {nome_mes(mes)} definido: {formatar_moeda(valor)}."
         if nome in ("limpar", "remover") and not pede_para_apagar(texto):
@@ -2324,8 +2579,8 @@ class CalculadorApp:
             if mes != self.mes_atual:  # mostra o mês antes de mexer nele
                 self._ir_para_chave(mes)
             if nome == "mudar_mes":  # None: não salvou nada, o modelo segue e responde
-                return None, (f"O app agora mostra {nome_mes(mes)} e os dados do prompt são "
-                              "desse mês. Responda à pergunta do usuário com texto.")
+                return None, (f"Mostrando {nome_mes(mes)}. Os dados do prompt agora são desse "
+                              "mês; responda à pergunta do usuário com texto.")
         if nome == "limpar":
             limpar = {"gastos": self.limpar_lancamentos, "rendas": self.limpar_rendas,
                       "salario": self.limpar_salario}.get(_achar(args.get("oque", ""),
@@ -2342,6 +2597,41 @@ class CalculadorApp:
         if nome == "copiar_contas_fixas":
             self._copiar_contas_fixas()
             return True, "Abri a cópia de contas fixas."
+        if nome == "criar_caixinha":
+            meta = 0.0
+            if args.get("meta") not in (None, "", 0, "0"):
+                meta = _valor_do_modelo({"valor": args["meta"]}, texto)
+                if isinstance(meta, str):
+                    return False, meta
+            guardar = 0.0  # "coloca 150 numa caixinha nova moto": cria e já guarda
+            if args.get("guardar") not in (None, "", 0, "0"):
+                guardar = _valor_do_modelo({"valor": args["guardar"]}, texto)
+                if isinstance(guardar, str):
+                    return False, guardar
+            ok, resultado = self.criar_caixinha(args.get("nome", ""), meta)
+            if ok and guardar:
+                nome_criado = self.caixinhas[-1]["nome"]
+                resultado += " " + self.movimentar_caixinha(nome_criado, guardar, True)[1]
+            return ok, resultado
+        if nome in ("caixinha", "renomear_caixinha", "excluir_caixinha"):
+            nomes = [cx["nome"] for cx in self.caixinhas]
+            cx = _achar(args.get("nome", ""), nomes)
+            if not cx:
+                return False, ("Erro: caixinha não encontrada. Existem: "
+                               + (", ".join(nomes) or "nenhuma (use criar_caixinha)") + ".")
+            if nome == "renomear_caixinha":
+                return self.renomear_caixinha(cx, args.get("novo_nome", ""))
+            if nome == "excluir_caixinha":
+                if not pede_para_apagar(texto):
+                    return False, "Erro: o usuário não pediu para excluir. Responda com texto."
+                return self.excluir_caixinha(cx)
+            acao = _achar(args.get("acao", ""), ["guardar", "retirar"])
+            if not acao:
+                return False, "Erro: acao deve ser guardar ou retirar."
+            valor = _valor_do_modelo(args, texto)
+            if isinstance(valor, str):
+                return False, valor
+            return self.movimentar_caixinha(cx, valor, acao == "guardar")
         return False, "Erro: ferramenta desconhecida."
 
     def _remover_pelo_assistente(self, args, mes):
@@ -2364,7 +2654,7 @@ class CalculadorApp:
             return True, "Cancelado: nada foi apagado."
         self._cancelar_edicao()  # os índices mudam
         del (self.gastos if tipo == "g" else self.rendas)[indice]
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._preencher_renda()
         self._atualizar_tudo()
         return True, f"Removido: {descricao}."
@@ -2387,12 +2677,15 @@ class CalculadorApp:
                     args = json.loads(args)
                 except ValueError:
                     args = {}
-            ok, resultado = self._executar_ferramenta(funcao.get("name"), args)
+            if funcao.get("name") in self._oferecidas:
+                ok, resultado = self._executar_ferramenta(funcao.get("name"), args)
+            else:  # chamada escrita no texto de uma ferramenta que não foi oferecida
+                ok, resultado = False, "Erro: isso não está disponível agora. Responda com texto."
             if ok:
                 salvou = True
                 self._escrever_chat("Feito", resultado)
-            elif ok is None:  # só trocou de mês
-                self._escrever_chat("Feito", f"Mostrando {nome_mes(self.mes_atual)}.")
+            elif ok is None:  # trocou de mês: mostra a 1ª frase e o modelo segue
+                self._escrever_chat("Feito", resultado.split(". ")[0].rstrip(".") + ".")
             else:
                 erros.append(resultado)
                 self._erros_no_turno.append(resultado)
@@ -2542,7 +2835,7 @@ class CalculadorApp:
             self._toast("Informe um salário numérico válido.", "erro")
             return
         self.orcamentos[self.mes_atual] = valor
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._atualizar_tudo()
         self._toast(f"Salário de {nome_mes(self.mes_atual)} salvo.", "sucesso")
 
@@ -2580,7 +2873,7 @@ class CalculadorApp:
             if app:
                 nova["app"] = app
             self.rendas.append(nova)
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._preencher_renda()
         self._atualizar_tudo()
         nome, mes = app or fonte, nome_mes(self.mes_atual)
@@ -2624,7 +2917,7 @@ class CalculadorApp:
             self.gastos[self._editando] = novo
         else:
             self.gastos.append(novo)
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
 
         if editando:
             self._cancelar_edicao()
@@ -2659,6 +2952,9 @@ class CalculadorApp:
             self._toast("Selecione um gasto para editar.", "info")
             return
         item = self.gastos[indice]
+        if item.get("caixinha"):  # o formulário não guarda a caixinha: o saldo dela mudaria
+            self._toast("Dinheiro de caixinha se mexe na aba Caixinhas.", "info")
+            return
         self.valor_var.set(formatar_numero(item["valor"]))
         self.data_var.set(item["data"])
         self.cat_var.set(item["categoria"])
@@ -2697,7 +2993,7 @@ class CalculadorApp:
             return
         self._cancelar_edicao()  # os índices mudam
         self.gastos = [g for g in self.gastos if mes_do_gasto(g) != self.mes_atual]
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._atualizar_tudo()
         self._toast(f"Gastos de {mes} apagados.", "sucesso")
 
@@ -2715,7 +3011,7 @@ class CalculadorApp:
         ):
             return
         del self.orcamentos[self.mes_atual]
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._sincronizar_mes()
         self._toast(f"Salário de {mes} apagado.", "sucesso")
 
@@ -2733,7 +3029,7 @@ class CalculadorApp:
         ):
             return
         self.rendas = [r for r in self.rendas if mes_do_gasto(r) != self.mes_atual]
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._preencher_renda()
         self._atualizar_tudo()
         self._toast(f"Rendas extras de {mes} apagadas.", "sucesso")
@@ -2755,7 +3051,7 @@ class CalculadorApp:
         ):
             self._cancelar_edicao()  # os índices mudam depois do del
             del self.gastos[indice]
-            salvar_dados(self.orcamentos, self.gastos, self.rendas)
+            self._salvar()
             self._atualizar_tudo()
             self._toast("Gasto removido.", "sucesso")
 
@@ -2779,14 +3075,14 @@ class CalculadorApp:
         else:
             del self.gastos[indice]
             mensagem = "Parcela removida."
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._salvar()
         self._atualizar_tudo()
         self._toast(mensagem, "sucesso")
 
     def _copiar_contas_fixas(self):
         parcelas = distribuir_parcelas(self.gastos)
         if parcelas:
-            salvar_dados(self.orcamentos, self.gastos, self.rendas)
+            self._salvar()
             self._atualizar_tudo()
             self._toast(f"{parcelas} parcela(s) de compras/empréstimos lançada(s) "
                         "nos meses seguintes.", "sucesso")
@@ -2995,13 +3291,17 @@ class CalculadorApp:
             copiadas += 1
 
         if copiadas:
-            salvar_dados(self.orcamentos, self.gastos, self.rendas)
+            self._salvar()
             self._sincronizar_mes()
         return copiadas
 
     # ---------------------------------------------------------- atualização ---
+    def _salvar(self):
+        salvar_dados(self.orcamentos, self.gastos, self.rendas, self.caixinhas)
+
     def _atualizar_tudo(self):
         self._atualizar_lista()
+        self._atualizar_caixinhas()
         self._atualizar_diario()
         self._atualizar_progresso()
         self._atualizar_graficos()
@@ -3034,7 +3334,7 @@ class CalculadorApp:
         mov_mes = {n: movimento[n][k] if no_mes else 0.0 for n in POUPANCAS}
         guardado = sum(mov_mes.values())
         # quantos meses de gastos a reserva cobre (sem contar o que foi guardado)
-        categorias_poupanca = {cat for cat, _ in POUPANCAS.values()}
+        categorias_poupanca = {cat for cat, _ in POUPANCAS.values()} | {CATEGORIA_CAIXINHA}
         gasto_por_mes = {}
         for g in self.gastos:
             m = mes_do_gasto(g)
