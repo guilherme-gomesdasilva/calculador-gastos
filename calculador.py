@@ -893,6 +893,8 @@ FERRAMENTAS = [
                 {"acao": {"type": "string", "enum": ["guardar", "retirar"]},
                  "nome": {"type": "string", "description": "nome da caixinha"},
                  "valor": {"type": "number"}}, ["acao", "nome", "valor"]),
+    _ferramenta("meta_caixinha", "Muda a meta de uma caixinha; meta 0 tira a meta.",
+                {"nome": {"type": "string"}, "meta": {"type": "number"}}, ["nome", "meta"]),
     _ferramenta("renomear_caixinha", "Troca o nome de uma caixinha.",
                 {"nome": {"type": "string"}, "novo_nome": {"type": "string"}},
                 ["nome", "novo_nome"]),
@@ -2329,6 +2331,9 @@ class CalculadorApp:
         ctk.CTkButton(acoes, text="✏️  Renomear", width=100, font=self.ft_pequena,
                       fg_color="transparent", text_color=ACCENT, hover_color=CARD,
                       command=lambda: self._renomear_ui(nome)).pack(side="right", padx=4)
+        ctk.CTkButton(acoes, text="🎯  Meta", width=80, font=self.ft_pequena,
+                      fg_color="transparent", text_color=ACCENT, hover_color=CARD,
+                      command=lambda: self._meta_ui(nome)).pack(side="right")
         return valor, barra, pct
 
     def _toast_resultado(self, resultado):
@@ -2352,6 +2357,18 @@ class CalculadorApp:
         self._toast_resultado((ok, mensagem))
         if ok:
             var.set("")
+
+    def _meta_ui(self, nome):
+        texto = ctk.CTkInputDialog(title="Meta da caixinha",
+                                   text=f"Nova meta para {nome} (ex.: 3.500,00; "
+                                        "0 tira a meta):").get_input()
+        if texto is None:
+            return
+        meta = self._parse_valor(texto)
+        if meta is None or meta < 0:
+            self._toast("Informe a meta em reais, ex.: 3.500,00.", "erro")
+            return
+        self._toast_resultado(self.definir_meta_caixinha(nome, meta))
 
     def _renomear_ui(self, nome):
         novo = ctk.CTkInputDialog(title="Renomear caixinha",
@@ -2384,6 +2401,17 @@ class CalculadorApp:
         self._atualizar_tudo()
         acao = "Guardado" if guardar else "Retirado"
         return True, f"{acao} {formatar_moeda(valor)} {'na' if guardar else 'da'} caixinha {nome}."
+
+    def definir_meta_caixinha(self, nome, meta):
+        caixa = next((cx for cx in self.caixinhas if cx["nome"] == nome), None)
+        if caixa is None:
+            return False, f"Erro: não existe a caixinha {nome}."
+        caixa["meta"] = meta
+        self._salvar()
+        self._atualizar_caixinhas()  # a barra aparece/some: redesenha o card
+        if meta:
+            return True, f"Meta da caixinha {nome}: {formatar_moeda(meta)}."
+        return True, f"Caixinha {nome} agora está sem meta."
 
     def renomear_caixinha(self, nome, novo):
         novo, erro = nome_de_caixinha(novo, self.caixinhas, atual=nome)
@@ -2463,7 +2491,8 @@ class CalculadorApp:
             "apagar tudo de um mês, limpar; para apagar um lançamento, remover (só se o "
             "usuário pedir para apagar); para perguntas sobre outro mês, mudar_mes. "
             "Caixinhas são objetivos com nome (ex.: Viagem): criar_caixinha, caixinha "
-            "(guardar/retirar; nunca lancar), renomear_caixinha e excluir_caixinha; criar "
+            "(guardar/retirar; nunca lancar), meta_caixinha, renomear_caixinha e "
+            "excluir_caixinha; criar "
             "caixinha não pede valor (a meta é opcional). Se "
             "faltar o valor, pergunte antes. O usuário escreve em português informal do "
             "Brasil, muitas vezes sem acentos, com abreviações e erros de digitação (ex.: "
@@ -2613,7 +2642,7 @@ class CalculadorApp:
                 nome_criado = self.caixinhas[-1]["nome"]
                 resultado += " " + self.movimentar_caixinha(nome_criado, guardar, True)[1]
             return ok, resultado
-        if nome in ("caixinha", "renomear_caixinha", "excluir_caixinha"):
+        if nome in ("caixinha", "meta_caixinha", "renomear_caixinha", "excluir_caixinha"):
             nomes = [cx["nome"] for cx in self.caixinhas]
             cx = _achar(args.get("nome", ""), nomes)
             if not cx:
@@ -2621,6 +2650,13 @@ class CalculadorApp:
                                + (", ".join(nomes) or "nenhuma (use criar_caixinha)") + ".")
             if nome == "renomear_caixinha":
                 return self.renomear_caixinha(cx, args.get("novo_nome", ""))
+            if nome == "meta_caixinha":
+                if args.get("meta") in (0, "0") and pede_para_apagar(texto):
+                    return self.definir_meta_caixinha(cx, 0.0)  # "tira a meta da viagem"
+                meta = _valor_do_modelo({"valor": args.get("meta")}, texto)
+                if isinstance(meta, str):
+                    return False, meta
+                return self.definir_meta_caixinha(cx, meta)
             if nome == "excluir_caixinha":
                 if not pede_para_apagar(texto):
                     return False, "Erro: o usuário não pediu para excluir. Responda com texto."
