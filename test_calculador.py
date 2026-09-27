@@ -273,6 +273,7 @@ def test_salario_do_assistente():
     assert c.salario_do_assistente({"valor": 2800, "mes": "10/2026"}, "2026-09",
                                    "salario de outubro 2,8 mil") == ("2026-10", 2800.0)
     assert isinstance(c.salario_do_assistente({"valor": 3000}, "2026-09", "meu salario"), str)
+    assert "limpar" in c.salario_do_assistente({"valor": 0}, "2026-09", "tira o salario")
     assert isinstance(c.salario_do_assistente({"valor": 10, "mes": "13/2026"}, "2026-09",
                                               "10"), str)
 
@@ -291,7 +292,29 @@ def test_chamadas_de_ferramenta():
     assert c.chamadas_de_ferramenta({"content": '{"total": 10}'}) == []
 
 
+def test_achar_lancamentos():
+    gastos = [{"data": "05/09/2026", "categoria": "Transporte", "instituicao": "Uber / 99",
+               "descricao": "Transporte - Uber / 99", "valor": 12.0},
+              {"data": "06/09/2026", "categoria": "Luz", "descricao": "Luz", "valor": 12.0},
+              {"data": "05/08/2026", "categoria": "Luz", "descricao": "Luz", "valor": 90.0}]
+    rendas = [{"data": "05/09/2026", "fonte": "Delivery / Apps", "app": "iFood",
+               "descricao": "iFood", "valor": 80.0}]
+    achar = lambda args, mes="2026-09": c.achar_lancamentos(gastos, rendas, args, mes)
+    assert achar({"texto": "uber"}) == [("g", 0)]
+    assert achar({"valor": 12}) == [("g", 0), ("g", 1)]  # dois: o app pede para escolher
+    assert achar({"valor": 12, "data": "06/09/2026"}) == [("g", 1)]
+    assert achar({"texto": "IFOOD", "tipo": "ganho"}) == [("r", 0)]
+    assert achar({"texto": "ifood", "tipo": "gasto"}) == []
+    assert achar({"texto": "luz"}, "2026-08") == [("g", 2)]
+    assert achar({}) == [] and achar({"tipo": "gasto"}) == []  # nunca o mês inteiro
+    assert achar({"valor": "abc"}) == []
+    assert c.mes_do_modelo({"mes": "8/2026"}, "x") == "2026-08"
+    assert c.mes_do_modelo({}, "2026-09") == "2026-09"
+    assert c.mes_do_modelo({"mes": "13/2026"}, "2026-09") is None
+
+
 if __name__ == "__main__":
+    test_achar_lancamentos()
     test_lancamento_do_assistente()
     test_chamadas_de_ferramenta()
     test_salario_do_assistente()

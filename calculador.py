@@ -807,11 +807,46 @@ FERRAMENTA_LANCAR = {"type": "function", "function": {
 FERRAMENTA_SALARIO = {"type": "function", "function": {
     "name": "salario",
     "description": "Define o salário do mês (troca o que havia). Salário não é ganho: "
-                   "use esta ferramenta, nunca lancar, quando o usuário falar de salário.",
+                   "use esta ferramenta, nunca lancar, quando o usuário falar de salário. "
+                   "Para apagar o salário use limpar com oque=salario.",
     "parameters": {"type": "object", "required": ["valor"], "properties": {
         "valor": {"type": "number", "description": "valor em reais, ex.: 2800"},
         "mes": {"type": "string", "description": "mm/aaaa; omita para o mês aberto no app"},
     }}}}
+
+
+def _ferramenta(nome, descricao, propriedades=None, obrigatorios=()):
+    return {"type": "function", "function": {
+        "name": nome, "description": descricao,
+        "parameters": {"type": "object", "required": list(obrigatorios),
+                       "properties": propriedades or {}}}}
+
+
+_MES = {"type": "string", "description": "mm/aaaa; omita para o mês aberto no app"}
+FERRAMENTAS = [
+    FERRAMENTA_LANCAR,
+    FERRAMENTA_SALARIO,
+    _ferramenta("limpar", "Apaga de uma vez os gastos, as rendas extras ou o salário de "
+                "um mês. O app pede confirmação ao usuário.",
+                {"oque": {"type": "string", "enum": ["gastos", "rendas", "salario"]},
+                 "mes": _MES}, ["oque"]),
+    _ferramenta("remover", "Apaga UM lançamento do mês (gasto ou ganho), achado pelo "
+                "valor e/ou pelo texto (categoria, app, fonte). O app pede confirmação.",
+                {"tipo": {"type": "string", "enum": ["gasto", "ganho"]},
+                 "valor": {"type": "number"},
+                 "texto": {"type": "string", "description": "ex.: uber, ifood, luz"},
+                 "data": {"type": "string", "description": "dd/mm/aaaa, se o usuário disse"},
+                 "mes": _MES}),
+    _ferramenta("mudar_mes", "Mostra outro mês no app (para ver ou mexer nele).",
+                {"mes": {"type": "string", "description": "mm/aaaa"}}, ["mes"]),
+    _ferramenta("copiar_contas_fixas", "Abre a janela do app que copia as contas fixas "
+                "(aluguel, luz...) de um mês para outro e lança parcelas futuras."),
+]
+
+
+def _chave(texto):
+    """Texto para comparar: sem acentos, minúsculas, sem espaços nas pontas."""
+    return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().casefold().strip()
 
 
 def _achar(texto, opcoes):
@@ -819,8 +854,7 @@ def _achar(texto, opcoes):
     a única que o contém ("uber" -> "Uber / 99"), a única contida nele
     ("Transporte - Ônibus" -> "Transporte") ou a mais parecida, para erro de
     digitação ("trasporte" -> "Transporte"); senão None."""
-    def chave(t):
-        return unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode().casefold().strip()
+    chave = _chave
     procurado = chave(texto)
     if not procurado:
         return None
@@ -865,11 +899,46 @@ def _valor_do_modelo(args, texto_usuario, minimo=0.01):
 
 def salario_do_assistente(args, mes_padrao, texto_usuario=None):
     """Valida "salario": retorna (mês "AAAA-MM", valor) ou um texto de erro."""
-    valor = _valor_do_modelo(args, texto_usuario, minimo=0)  # 0 apaga o salário
+    if args.get("valor") in (0, "0"):
+        return "Erro: para apagar o salário use a ferramenta limpar com oque=salario."
+    valor = _valor_do_modelo(args, texto_usuario)
     if isinstance(valor, str):
         return valor
-    mes = mes_de_data("01/" + str(args["mes"])) if args.get("mes") else mes_padrao
+    mes = mes_do_modelo(args, mes_padrao)
     return (mes, valor) if mes else "Erro: mes deve ser mm/aaaa."
+
+
+def mes_do_modelo(args, mes_padrao):
+    """"mm/aaaa" (ou "m/aaaa") dos argumentos -> "AAAA-MM"; sem mês, o padrão."""
+    return mes_de_data("01/" + str(args["mes"]).strip()) if args.get("mes") else mes_padrao
+
+
+def achar_lancamentos(gastos, rendas, args, mes):
+    """Lançamentos do mês que batem com o pedido de "remover": [("g"|"r", índice)].
+
+    Filtra por tipo, valor, data e texto (na categoria, descrição, app, fonte);
+    pede pelo menos valor ou texto, para não achar o mês inteiro.
+    """
+    texto, valor = _chave(args.get("texto", "")), args.get("valor")
+    if not texto and valor in (None, ""):
+        return []
+    tipos = {"gasto": ["g"], "ganho": ["r"]}.get(str(args.get("tipo", "")).lower(), ["g", "r"])
+    achados = []
+    for tipo in tipos:
+        for i, item in enumerate(gastos if tipo == "g" else rendas):
+            if mes_do_gasto(item) != mes or (args.get("data") and item["data"] != args["data"]):
+                continue
+            try:
+                if valor not in (None, "") and round(float(valor), 2) != item["valor"]:
+                    continue
+            except (TypeError, ValueError):
+                return []
+            campos = " ".join(str(item.get(k, "")) for k in
+                              ("categoria", "descricao", "instituicao", "app", "fonte"))
+            if texto and texto not in _chave(campos):
+                continue
+            achados.append((tipo, i))
+    return achados
 
 
 def lancamento_do_assistente(args, texto_usuario=None):
@@ -2063,7 +2132,7 @@ class CalculadorApp:
                                        font=self.ft_normal, wrap="word")
         self.chat_log.pack(fill="both", expand=True, pady=(6, 10))
         for quem, cor in (("Você", ACCENT), ("Assistente", COR_RENDA),
-                          ("Lançamento", COR_GASTO), ("Erro", COR_NEG)):
+                          ("Feito", COR_GASTO), ("Erro", COR_NEG)):
             self.chat_log.tag_config(quem, foreground=cor)
         linha = ctk.CTkFrame(parent, fg_color="transparent")
         linha.pack(fill="x")
@@ -2097,7 +2166,9 @@ class CalculadorApp:
             "invente valores; os totais já estão calculados. Perguntas sobre os dados "
             "respondem-se com texto, SEM ferramenta. Use a ferramenta lancar só quando "
             "o usuário contar um gasto ou ganho novo (ex.: \"gastei 20 no mercado\"); "
-            "depois confirme em uma frase. Para salário use a ferramenta salario. Se "
+            "depois confirme em uma frase. Para salário use a ferramenta salario; para "
+            "apagar tudo de um mês, limpar; para apagar um lançamento, remover; para ver "
+            "outro mês, mudar_mes. Se "
             "faltar o valor, pergunte antes. O usuário escreve em português informal do "
             "Brasil, muitas vezes sem acentos, com abreviações e erros de digitação (ex.: "
             "\"salario\", \"alimentacao\", \"vc\", \"q\", \"merc\", \"2k\"): entenda o "
@@ -2146,7 +2217,7 @@ class CalculadorApp:
     def _pedir_ollama(self, rodadas):
         """Chama o Ollama numa thread (a janela não trava) e espera a resposta."""
         self.btn_chat.configure(state="disabled", text="Pensando…")
-        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": [FERRAMENTA_LANCAR, FERRAMENTA_SALARIO],
+        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": FERRAMENTAS,
                  "messages": [{"role": "system", "content": self._contexto_assistente()}]
                  + self.chat_msgs}
         fila = queue.Queue()
@@ -2179,7 +2250,56 @@ class CalculadorApp:
             salvar_dados(self.orcamentos, self.gastos, self.rendas)
             self._sincronizar_mes()  # campo Salário e cards
             return True, f"Salário de {nome_mes(mes)} definido: {formatar_moeda(valor)}."
+        if nome in ("limpar", "remover", "mudar_mes"):
+            mes = mes_do_modelo(args, self.mes_atual)
+            if not mes:
+                return False, "Erro: mes deve ser mm/aaaa."
+            if mes != self.mes_atual:  # mostra o mês antes de mexer nele
+                self._ir_para_chave(mes)
+            if nome == "mudar_mes":
+                return True, f"Mostrando {nome_mes(mes)}."
+        if nome == "limpar":
+            limpar = {"gastos": self.limpar_lancamentos, "rendas": self.limpar_rendas,
+                      "salario": self.limpar_salario}.get(_achar(args.get("oque", ""),
+                                                                 ["gastos", "rendas", "salario"]))
+            if not limpar:
+                return False, "Erro: oque deve ser gastos, rendas ou salario."
+            antes = (len(self.gastos), len(self.rendas), dict(self.orcamentos))
+            limpar()  # pede confirmação e avisa se não há o que apagar
+            if antes == (len(self.gastos), len(self.rendas), self.orcamentos):
+                return True, "Nada foi apagado (cancelado ou não havia o que apagar)."
+            return True, f"Apagado: {args['oque']} de {nome_mes(mes)}."
+        if nome == "remover":
+            return self._remover_pelo_assistente(args, mes)
+        if nome == "copiar_contas_fixas":
+            self._copiar_contas_fixas()
+            return True, "Abri a cópia de contas fixas."
         return False, "Erro: ferramenta desconhecida."
+
+    def _remover_pelo_assistente(self, args, mes):
+        achados = achar_lancamentos(self.gastos, self.rendas, args, mes)
+        if not achados:
+            return False, (f"Erro: nenhum lançamento de {nome_mes(mes)} bate com isso. "
+                           "Pergunte ao usuário o valor ou a data.")
+        itens = [(tipo, i, (self.gastos if tipo == "g" else self.rendas)[i])
+                 for tipo, i in achados]
+        if len(itens) > 1:  # não chuta: lista para o usuário escolher
+            return True, "Achei mais de um; diga a data ou o valor:\n" + "\n".join(
+                f"- {item['data']} {item.get('descricao') or item.get('fonte')} "
+                f"{formatar_moeda(item['valor'])}" for _t, _i, item in itens[:8])
+        tipo, indice, item = itens[0]
+        if item.get("compra"):
+            return True, "Esse é uma parcela: remova na aba Lançamentos."
+        descricao = f"{item.get('descricao') or item.get('fonte')} de {item['data']} " \
+                    f"({formatar_moeda(item['valor'])})"
+        if not self._confirmar("Remover lançamento", f"Remover {descricao}?"):
+            return True, "Cancelado: nada foi apagado."
+        self._cancelar_edicao()  # os índices mudam
+        del (self.gastos if tipo == "g" else self.rendas)[indice]
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._preencher_renda()
+        self._atualizar_tudo()
+        return True, f"Removido: {descricao}."
 
     def _resposta_ollama(self, msg, rodadas):
         if isinstance(msg, Exception):
@@ -2202,12 +2322,12 @@ class CalculadorApp:
             ok, resultado = self._executar_ferramenta(funcao.get("name"), args)
             if ok:
                 salvou = True
-                self._escrever_chat("Lançamento", resultado)
+                self._escrever_chat("Feito", resultado)
             else:
                 erros.append(resultado)
                 self._erros_no_turno.append(resultado)
             self.chat_msgs.append({"role": "tool", "content": resultado})
-        # Salvou: a linha "Lançamento" já confirma. Perguntar de novo ao modelo só
+        # Salvou: a linha "Feito" já confirma. Perguntar de novo ao modelo só
         # traz saldos inventados e o risco de lançar outra vez. Só erro: ele corrige.
         if chamadas and not salvou and rodadas > 1:
             self._pedir_ollama(rodadas - 1)
@@ -2221,8 +2341,8 @@ class CalculadorApp:
             finge = any(p in msg["content"].lower() for p in ("registrado", "registrei", "salvei"))
             # a ferramenta falhou e o modelo respondeu com texto: nada foi salvo
             if not chamadas and (finge or self._erros_no_turno):
-                self._escrever_chat("Erro", "Nada foi salvo nesta mensagem. Tente de novo "
-                                    "com o valor e o tipo, ex.: \"ganhei 80 no iFood hoje\".")
+                self._escrever_chat("Erro", "Nada foi feito nesta mensagem. Tente de novo "
+                                    "com mais detalhes, ex.: \"ganhei 80 no iFood hoje\".")
         self.btn_chat.configure(state="normal", text="Enviar")
 
     def _montar_aba_graficos(self, parent):
