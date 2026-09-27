@@ -23,11 +23,15 @@ import calendar
 import itertools
 import json
 import os
+import queue
+import re
 import sys
+import threading
 import tkinter as tk
 import unicodedata
+import urllib.request
 import uuid
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -751,6 +755,145 @@ def totais_por_cartao(gastos):
     return totais
 
 
+def subopcoes(gasto, escolha):
+    """Opções do 2º seletor (banco/transporte do gasto, app do ganho), ou None."""
+    if gasto:
+        return SUBCATEGORIAS[escolha][2] if escolha in SUBCATEGORIAS else None
+    return APPS_DELIVERY if escolha == FONTE_DELIVERY else None
+
+
+def novo_lancamento(gasto, valor, data_texto, escolha, sub=None, cartao=None):
+    """Monta o gasto (categoria, pagamento) ou a renda (fonte, app) de um dia."""
+    item = {"data": data_texto, "valor": valor}
+    if gasto:
+        item.update(categoria=escolha, cartao=cartao or CARTAO_PADRAO)
+        if sub:
+            item["instituicao"] = sub
+        item["descricao"] = rotulo_categoria(item)
+    else:
+        item.update(descricao=sub or escolha, fonte=escolha)
+        if sub:
+            item["app"] = sub
+    return item
+
+
+# ------------------------------------------------------------ assistente ---
+# Modelo local do Ollama (https://ollama.com): troque por outro que suporte
+# ferramentas, ex.: "qwen2.5-coder:14b" (melhor, mais lento) ou "llama3.1".
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_MODELO = "qwen2.5-coder:7b"
+MAX_RODADAS = 4  # tentativas do modelo (ex.: corrigir categoria inválida) por mensagem
+
+FERRAMENTA_LANCAR = {"type": "function", "function": {
+    "name": "lancar",
+    "description": "Registra no app um gasto ou um ganho que o usuário contou. Uma "
+                   "chamada por item: \"12 de uber e 6 de ônibus\" são duas. Ganho em app "
+                   "(iFood, Uber, 99...) é categoria Delivery / Apps com o app em detalhe.",
+    "parameters": {"type": "object", "required": ["tipo", "valor", "categoria"], "properties": {
+        "tipo": {"type": "string", "enum": ["gasto", "ganho"]},
+        "valor": {"type": "number", "description": "valor em reais, ex.: 25.9"},
+        "data": {"type": "string", "description": "dd/mm/aaaa; omita para hoje"},
+        "categoria": {"type": "string", "description":
+                      "gasto: uma de " + ", ".join(CATEGORIAS_DIA)
+                      + ". ganho: uma de " + ", ".join(FONTES_RENDA)},
+        "detalhe": {"type": "string", "description":
+                    "obrigatório em Fatura de Cartão (banco), Transporte (tipo) e "
+                    "Delivery / Apps (app: " + ", ".join(APPS_DELIVERY) + ")"},
+        "pagamento": {"type": "string", "enum": CARTOES},
+    }}}}
+
+
+def _achar(texto, opcoes):
+    """A opção igual ao texto (sem ligar para maiúsculas/acentos) ou, se não
+    houver, a única que o contém ("uber" -> "Uber / 99"); senão None."""
+    def chave(t):
+        return unicodedata.normalize("NFKD", str(t)).encode("ascii", "ignore").decode().casefold().strip()
+    procurado = chave(texto)
+    if not procurado:
+        return None
+    iguais = [o for o in opcoes if chave(o) == procurado]
+    contem = [o for o in opcoes if procurado in chave(o)]
+    return iguais[0] if iguais else contem[0] if len(contem) == 1 else None
+
+
+def numeros_do_texto(texto):
+    """Valores que aparecem no texto: "25", "12,50", "1.200", "12.5" (ambos os jeitos)."""
+    valores = set()
+    for n in re.findall(r"\d+(?:[.,]\d+)*", texto):
+        for convertido in (n.replace(".", "").replace(",", "."), n.replace(",", "")):
+            try:
+                valores.add(round(float(convertido), 2))
+            except ValueError:  # "1.2.3" no jeito americano
+                pass
+    return valores
+
+
+def lancamento_do_assistente(args, texto_usuario=None):
+    """Valida os argumentos que o modelo mandou para "lancar" (não confia nele).
+
+    Com `texto_usuario`, o valor precisa estar escrito nele: o modelo não inventa
+    quanto foi. Retorna (gasto: bool, item) pronto para salvar, ou um texto de
+    erro que volta para o modelo corrigir.
+    """
+    tipo = str(args.get("tipo", "")).lower()
+    try:
+        valor = round(float(args.get("valor")), 2)
+    except (TypeError, ValueError):
+        valor = 0
+    if tipo not in ("gasto", "ganho") or not 0 < valor <= MAX_CENTAVOS / 100:
+        return "Erro: tipo deve ser gasto ou ganho, e valor maior que zero."
+    if texto_usuario is not None and valor not in numeros_do_texto(texto_usuario):
+        return ("Erro: o usuário não escreveu esse valor. Não lance; pergunte quanto foi "
+                "(em números).")
+    try:
+        dia = datetime.strptime(args.get("data") or date.today().strftime("%d/%m/%Y"),
+                                "%d/%m/%Y")
+    except (TypeError, ValueError):
+        return "Erro: data deve ser dd/mm/aaaa."
+    gasto = tipo == "gasto"
+    opcoes = CATEGORIAS_DIA if gasto else FONTES_RENDA
+    escolha = _achar(args.get("categoria", ""), opcoes)
+    if not escolha:
+        return "Erro: categoria deve ser uma de: " + ", ".join(opcoes)
+    subs = subopcoes(gasto, escolha)
+    sub = _achar(args.get("detalhe", ""), subs) if subs else None
+    if subs and not sub:
+        return f"Erro: para {escolha}, detalhe deve ser um de: " + ", ".join(subs)
+    cartao = _achar(args.get("pagamento", ""), CARTOES) if gasto else None
+    return gasto, novo_lancamento(gasto, valor, dia.strftime("%d/%m/%Y"), escolha, sub, cartao)
+
+
+def chamadas_de_ferramenta(msg):
+    """tool_calls da resposta; modelos como o qwen2.5-coder às vezes escrevem a
+    chamada como JSON no texto ({"name": ..., "arguments": ...}): vale também."""
+    if msg.get("tool_calls"):
+        return msg["tool_calls"]
+    texto, decoder, chamadas, i = msg.get("content") or "", json.JSONDecoder(), [], 0
+    while (i := texto.find("{", i)) != -1:  # um ou mais objetos JSON no meio do texto
+        try:
+            obj, fim = decoder.raw_decode(texto, i)
+        except ValueError:
+            i += 1
+            continue
+        if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
+            chamadas.append({"function": obj})
+        i = fim
+    if chamadas:
+        msg["content"] = ""  # não mostra o JSON (nem o texto em volta) como resposta
+    return chamadas
+
+
+def chamar_ollama(corpo):
+    """POST em /api/chat (roda fora da interface); devolve a mensagem ou a exceção."""
+    pedido = urllib.request.Request(OLLAMA_URL + "/api/chat", data=json.dumps(corpo).encode(),
+                                    headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(pedido, timeout=300) as resposta:
+            return json.load(resposta)["message"]
+    except (OSError, ValueError, KeyError) as erro:  # sem Ollama, modelo ausente, timeout
+        return erro
+
+
 def _cor_progresso(pct):
     """Cor da barra conforme o quanto do orçamento já foi usado."""
     if pct >= 100:
@@ -1090,12 +1233,14 @@ class CalculadorApp:
         self.tabview.add("Gráficos do mês")
         self.tabview.add("Evolução")
         self.tabview.add("Reserva e Investimentos")
+        self.tabview.add("Assistente")
 
         self._montar_aba_lancamentos(self.tabview.tab("Lançamentos"))
         self._montar_aba_diario(self.tabview.tab("Diário"))
         self._montar_aba_graficos(self.tabview.tab("Gráficos do mês"))
         self._montar_aba_evolucao(self.tabview.tab("Evolução"))
         self._montar_aba_poupancas(self.tabview.tab("Reserva e Investimentos"))
+        self._montar_aba_assistente(self.tabview.tab("Assistente"))
 
     def _montar_header(self):
         header = ctk.CTkFrame(self.root, fg_color=ACCENT, corner_radius=0, height=76)
@@ -1769,7 +1914,7 @@ class CalculadorApp:
         self.dia_opcao_menu.configure(values=opcoes, button_color=cor,
                                       button_hover_color=hover)
         self.btn_add_dia.configure(fg_color=cor, hover_color=hover)
-        subs = self._subopcoes_dia()
+        subs = subopcoes(gasto, escolha)
         if subs:
             if self.dia_sub_var.get() not in subs:
                 self.dia_sub_var.set(next(iter(subs)))
@@ -1779,13 +1924,6 @@ class CalculadorApp:
         else:
             self.dia_sub_menu.grid_remove()
         self.dia_cartao_menu.grid() if gasto else self.dia_cartao_menu.grid_remove()
-
-    def _subopcoes_dia(self):
-        """Opções do 2º seletor do Diário para a escolha atual, ou None."""
-        escolha = self.dia_opcao_var.get()
-        if self.dia_tipo.get() == "Gasto":
-            return SUBCATEGORIAS[escolha][2] if escolha in SUBCATEGORIAS else None
-        return APPS_DELIVERY if escolha == FONTE_DELIVERY else None
 
     def _ir_para_dia(self, dia):
         self.dia = dia
@@ -1800,26 +1938,21 @@ class CalculadorApp:
         if valor is None or valor <= 0:
             self._toast("Informe um valor maior que zero.", "erro")
             return
+        gasto = self.dia_tipo.get() == "Gasto"
         escolha = self.dia_opcao_var.get()
-        sub = self.dia_sub_var.get() if self._subopcoes_dia() else None
-        item = {"data": self.dia.strftime("%d/%m/%Y"), "valor": valor}
-        if self.dia_tipo.get() == "Gasto":
-            item.update(categoria=escolha, cartao=self.dia_cartao_var.get())
-            if sub:
-                item["instituicao"] = sub
-            item["descricao"] = rotulo_categoria(item)
-            self.gastos.append(item)
-        else:
-            item.update(descricao=sub or escolha, fonte=escolha)
-            if sub:
-                item["app"] = sub
-            self.rendas.append(item)
-        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        sub = self.dia_sub_var.get() if subopcoes(gasto, escolha) else None
+        item = novo_lancamento(gasto, valor, self.dia.strftime("%d/%m/%Y"), escolha, sub,
+                               self.dia_cartao_var.get())
+        self._guardar_lancamento(gasto, item)
         self.dia_valor_var.set("")
-        self._preencher_renda()
-        self._atualizar_tudo()
         self._toast(f"{self.dia_tipo.get()} de {formatar_moeda(valor)} lançado em "
                     f"{item['data']}.", "sucesso")
+
+    def _guardar_lancamento(self, gasto, item):
+        (self.gastos if gasto else self.rendas).append(item)
+        salvar_dados(self.orcamentos, self.gastos, self.rendas)
+        self._preencher_renda()
+        self._atualizar_tudo()
 
     def remover_do_dia(self):
         selecao = self.tree_dia.selection()
@@ -1881,6 +2014,154 @@ class CalculadorApp:
             valor_lbl.configure(text=formatar_moeda(valor))
             legenda.configure(text=texto)
         self.dia_tiles[2][0].configure(text_color=COR_POS if saldo_dia >= 0 else COR_NEG)
+
+    def _montar_aba_assistente(self, parent):
+        """Chat com um modelo local do Ollama que conhece seus dados e lança gastos/ganhos."""
+        parent.configure(fg_color="transparent")
+        self.chat_msgs = []  # mensagem atual e as chamadas de ferramenta dela
+        self.chat_log = ctk.CTkTextbox(parent, fg_color=CARD2, corner_radius=12,
+                                       font=self.ft_normal, wrap="word")
+        self.chat_log.pack(fill="both", expand=True, pady=(6, 10))
+        for quem, cor in (("Você", ACCENT), ("Assistente", COR_RENDA),
+                          ("Lançamento", COR_GASTO), ("Erro", COR_NEG)):
+            self.chat_log.tag_config(quem, foreground=cor)
+        linha = ctk.CTkFrame(parent, fg_color="transparent")
+        linha.pack(fill="x")
+        self.chat_var = tk.StringVar()
+        entrada = ctk.CTkEntry(linha, textvariable=self.chat_var, font=self.ft_normal,
+                               placeholder_text="Ex.: quanto ganhei no iFood este mês? "
+                                                "/ gastei 25 no almoço hoje no pix")
+        entrada.pack(side="left", fill="x", expand=True)
+        entrada.bind("<Return>", lambda e: self._enviar_chat())
+        self.btn_chat = ctk.CTkButton(linha, text="Enviar", width=110, font=self.ft_bold,
+                                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                                      command=self._enviar_chat)
+        self.btn_chat.pack(side="left", padx=(8, 0))
+        self._escrever_chat("Assistente", "Oi! Pergunte sobre seus gastos e ganhos, ou me "
+                            "conte um lançamento que eu registro. (modelo local: "
+                            f"{OLLAMA_MODELO})")
+
+    def _escrever_chat(self, quem, texto):
+        self.chat_log.configure(state="normal")
+        self.chat_log.insert("end", quem + "\n", quem)
+        self.chat_log.insert("end", texto.strip() + "\n\n")
+        self.chat_log.configure(state="disabled")
+        self.chat_log.see("end")
+
+    def _contexto_assistente(self):
+        """Prompt de sistema com as regras e os dados já somados (o modelo não soma)."""
+        hoje = date.today()
+        linhas = [
+            "Você é o assistente financeiro do app Calculador de Gastos. Responda em "
+            "português do Brasil, de forma curta e direta. Use só os dados abaixo e não "
+            "invente valores; os totais já estão calculados. Perguntas sobre os dados "
+            "respondem-se com texto, SEM ferramenta. Use a ferramenta lancar só quando "
+            "o usuário contar um gasto ou ganho novo (ex.: \"gastei 20 no mercado\"); "
+            "depois confirme em uma frase. Se faltar o valor, pergunte antes.",
+            f"Hoje é {DIAS_SEMANA[hoje.weekday()]}, {hoje:%d/%m/%Y}; ontem foi "
+            f"{date.fromordinal(hoje.toordinal() - 1):%d/%m/%Y}.",
+            "",
+            "Totais por mês (salário | rendas extras | gastos | saldo):",
+        ]
+        for mes in self._meses_com_dados_asc():
+            salario = self.orcamentos.get(mes, 0.0)
+            rendas = sum(r["valor"] for r in self.rendas if mes_do_gasto(r) == mes)
+            gastos = sum(g["valor"] for g in self.gastos if mes_do_gasto(g) == mes)
+            linhas.append(f"- {nome_mes(mes)}: {formatar_moeda(salario)} | "
+                          f"{formatar_moeda(rendas)} | {formatar_moeda(gastos)} | "
+                          f"{formatar_moeda(salario + rendas - gastos)}")
+        mes = nome_mes(self.mes_atual)
+        linhas += ["", f"Gastos por categoria em {mes}:"]
+        linhas += [f"- {cat}: {formatar_moeda(v)}"
+                   for cat, v in totais_por_categoria(self.gastos_do_mes()).items()]
+        por_fonte = {}
+        for r in self.rendas_do_mes():
+            fonte = r.get("app") or r.get("fonte", FONTE_PADRAO)
+            por_fonte[fonte] = por_fonte.get(fonte, 0.0) + r["valor"]
+        linhas += ["", f"Ganhos por fonte/app em {mes} (salário à parte):"]
+        linhas += [f"- {fonte}: {formatar_moeda(v)}" for fonte, v in por_fonte.items()]
+        linhas += ["", f"Lançamentos de {mes}:"]
+        linhas += [f"- {g['data']} gasto {rotulo_categoria(g)} ({g.get('cartao', CARTAO_PADRAO)})"
+                   f" {formatar_moeda(g['valor'])}" for g in self.gastos_do_mes()]
+        linhas += [f"- {r['data']} ganho {r.get('app') or r.get('fonte', FONTE_PADRAO)}"
+                   f" {formatar_moeda(r['valor'])}" for r in self.rendas_do_mes()]
+        return "\n".join(linhas)
+
+    def _enviar_chat(self):
+        texto = self.chat_var.get().strip()
+        if not texto or self.btn_chat.cget("state") == "disabled":
+            return
+        self.chat_var.set("")
+        self._escrever_chat("Você", texto)
+        # cada mensagem vai sozinha: o prompt já traz os dados atualizados, e com o
+        # histórico os modelos pequenos imitam "registrado" em vez de salvar
+        self.chat_msgs = [{"role": "user", "content": texto}]
+        self._pedir_ollama(MAX_RODADAS)
+
+    def _pedir_ollama(self, rodadas):
+        """Chama o Ollama numa thread (a janela não trava) e espera a resposta."""
+        self.btn_chat.configure(state="disabled", text="Pensando…")
+        corpo = {"model": OLLAMA_MODELO, "stream": False, "tools": [FERRAMENTA_LANCAR],
+                 "messages": [{"role": "system", "content": self._contexto_assistente()}]
+                 + self.chat_msgs}
+        fila = queue.Queue()
+        threading.Thread(target=lambda: fila.put(chamar_ollama(corpo)), daemon=True).start()
+
+        def esperar():  # o Tk só pode ser mexido na thread principal
+            try:
+                self._resposta_ollama(fila.get_nowait(), rodadas)
+            except queue.Empty:
+                self.root.after(100, esperar)
+        esperar()
+
+    def _resposta_ollama(self, msg, rodadas):
+        if isinstance(msg, Exception):
+            self._escrever_chat("Erro", f"Não consegui falar com o Ollama ({msg}). Veja se "
+                                f"ele está aberto (ollama serve) e se o modelo existe "
+                                f"(ollama pull {OLLAMA_MODELO}).")
+            self.btn_chat.configure(state="normal", text="Enviar")
+            return
+        self.chat_msgs.append(msg)
+        chamadas = chamadas_de_ferramenta(msg)
+        salvou, erros = False, []
+        for chamada in chamadas:
+            funcao = chamada.get("function", {})
+            args = funcao.get("arguments") or {}
+            if isinstance(args, str):  # alguns modelos mandam o JSON como texto
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            resultado = (lancamento_do_assistente(args, self.chat_msgs[0]["content"])
+                         if funcao.get("name") == "lancar"
+                         else "Erro: ferramenta desconhecida.")
+            if isinstance(resultado, tuple):
+                gasto, item = resultado
+                self._guardar_lancamento(gasto, item)
+                salvou = True
+                resultado = (f"Registrado: {'gasto' if gasto else 'ganho'} "
+                             f"{item['descricao']} de {formatar_moeda(item['valor'])} "
+                             f"em {item['data']}.")
+                self._escrever_chat("Lançamento", resultado)
+            else:
+                erros.append(resultado)
+            self.chat_msgs.append({"role": "tool", "content": resultado})
+        # Salvou: a linha "Lançamento" já confirma. Perguntar de novo ao modelo só
+        # traz saldos inventados e o risco de lançar outra vez. Só erro: ele corrige.
+        if chamadas and not salvou and rodadas > 1:
+            self._pedir_ollama(rodadas - 1)
+            return
+        for erro in erros:
+            self._escrever_chat("Erro", erro)
+        if msg.get("content"):
+            self._escrever_chat("Assistente", msg["content"])
+            # ponytail: busca por palavras; modelo pequeno às vezes finge que salvou.
+            # Acrescentar outras se aparecerem casos que escapem
+            finge = any(p in msg["content"].lower() for p in ("registrado", "registrei", "salvei"))
+            if finge and not chamadas:
+                self._escrever_chat("Erro", "Nada foi salvo nesta mensagem. Tente de novo "
+                                    "com o valor e o tipo, ex.: \"ganhei 80 no iFood hoje\".")
+        self.btn_chat.configure(state="normal", text="Enviar")
 
     def _montar_aba_graficos(self, parent):
         parent.configure(fg_color="transparent")

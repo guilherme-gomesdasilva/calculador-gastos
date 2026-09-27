@@ -228,7 +228,54 @@ def test_acumulado_poupancas():
         [], {"reserva": [], "investimentos": []}, {"reserva": [], "investimentos": []})
 
 
+def test_lancamento_do_assistente():
+    """O que o modelo manda para "lancar" é validado antes de salvar."""
+    gasto, item = c.lancamento_do_assistente(
+        {"tipo": "gasto", "valor": 30, "data": "10/08/2026", "categoria": "transporte",
+         "detalhe": "onibus", "pagamento": "pix"})  # sem acento/maiúscula
+    assert gasto and item == {"data": "10/08/2026", "valor": 30.0, "categoria": "Transporte",
+                              "cartao": "Pix", "instituicao": "Ônibus",
+                              "descricao": "Transporte - Ônibus"}
+    gasto, item = c.lancamento_do_assistente(
+        {"tipo": "ganho", "valor": "85.5", "categoria": "Delivery / Apps", "detalhe": "ifood"})
+    assert not gasto and item["app"] == "iFood" and item["valor"] == 85.5
+    _, item = c.lancamento_do_assistente(
+        {"tipo": "gasto", "valor": 12, "categoria": "Transporte", "detalhe": "uber"})
+    assert item["instituicao"] == "Uber / 99"  # a única opção que contém "uber"
+    assert c._achar("", c.CARTOES) is None and c._achar("o", c.CARTOES) is None  # ambíguo
+    assert item["data"] == c.date.today().strftime("%d/%m/%Y")  # sem data: hoje
+    for ruim in ({"tipo": "gasto", "valor": 0, "categoria": "Lazer"},
+                 {"tipo": "gasto", "valor": "abc", "categoria": "Lazer"},
+                 {"tipo": "roubo", "valor": 10, "categoria": "Lazer"},
+                 {"tipo": "gasto", "valor": 10, "categoria": "Cassino"},
+                 {"tipo": "gasto", "valor": 10, "categoria": "Parcelamento de Compras"},
+                 {"tipo": "gasto", "valor": 10, "categoria": "Lazer", "data": "31/02/2026"},
+                 {"tipo": "ganho", "valor": 10, "categoria": "Delivery / Apps"}):
+        assert isinstance(c.lancamento_do_assistente(ruim), str), ruim
+    # o valor precisa estar no que o usuário escreveu
+    lazer = {"tipo": "gasto", "valor": 50, "categoria": "Lazer"}
+    assert isinstance(c.lancamento_do_assistente(lazer, "gastei no cinema"), str)
+    assert isinstance(c.lancamento_do_assistente(lazer, "gastei 50 no cinema"), tuple)
+    assert c.numeros_do_texto("R$ 1.200,50 e 12.5 e 3") >= {1200.5, 12.5, 125.0, 3.0}
+
+
+def test_chamadas_de_ferramenta():
+    real = {"tool_calls": [{"function": {"name": "lancar", "arguments": {}}}]}
+    assert c.chamadas_de_ferramenta(real) == real["tool_calls"]
+    texto = {"content": '```json\n{"name": "lancar", "arguments": {"valor": 25}}\n```'}
+    assert c.chamadas_de_ferramenta(texto) == [
+        {"function": {"name": "lancar", "arguments": {"valor": 25}}}]
+    assert texto["content"] == ""  # o JSON não aparece no chat
+    duas = {"content": '{"name": "lancar", "arguments": {"valor": 12}}\n\n'
+                       '{"name": "lancar", "arguments": {"valor": 6}}\nConfirme.'}
+    assert [x["function"]["arguments"]["valor"] for x in c.chamadas_de_ferramenta(duas)] == [12, 6]
+    assert c.chamadas_de_ferramenta({"content": "Você gastou R$ 10,00."}) == []
+    assert c.chamadas_de_ferramenta({"content": '{"total": 10}'}) == []
+
+
 if __name__ == "__main__":
+    test_lancamento_do_assistente()
+    test_chamadas_de_ferramenta()
     test_outros_por_ultimo()
     test_acumulado_poupancas()
     test_emprestimo_parcelado_nao_e_copiado_como_conta_fixa()
