@@ -11,8 +11,6 @@ Um aplicativo de desktop em Python para acompanhar seus gastos mês a mês:
 defina um orçamento, registre despesas por categoria e forma de pagamento e
 veja tudo em gráficos que se atualizam ao vivo.
 
-![screenshot](assets/screenshot.png)
-
 ---
 
 ## ✨ Funcionalidades
@@ -51,7 +49,11 @@ veja tudo em gráficos que se atualizam ao vivo.
   ao clicar em *Copiar contas fixas*, as parcelas que faltam são lançadas nos
   meses seguintes (1/12, 2/12…), sem duplicar.
 - 🌗 **Modo claro/escuro** com um clique.
-- 💾 **Salvamento automático** em JSON (nada de configuração).
+- 💾 **Salvamento automático** em JSON, com validação dos dados, gravação
+  atômica e preservação de arquivos inválidos.
+- 💬 **Assistente opcional com Ollama** — registre gastos e ganhos por texto
+  usando um modelo local. Os valores e categorias passam por validação antes
+  do lançamento; exclusões pedem confirmação na interface.
 
 ---
 
@@ -92,6 +94,88 @@ python calculador.py
 > Os seus gastos ficam salvos em `gastos.json`, que **não** é versionado
 > (está no `.gitignore`). O arquivo `gastos.exemplo.json` serve como ponto
 > de partida — se você não copiá-lo, o app começa vazio.
+
+---
+
+## 💬 Assistente local com Ollama (opcional)
+
+O aplicativo funciona sem Ollama. Para usar a aba de assistente:
+
+1. Instale o [Ollama](https://ollama.com/) e inicie o serviço local.
+2. Baixe o modelo configurado por padrão:
+
+   ```bash
+   ollama pull qwen2.5-coder:14b
+   ```
+
+3. Abra o aplicativo com `python calculador.py` e use o assistente.
+   Exemplo: `gastei 12 de uber e ganhei 85 no ifood`.
+
+O padrão é `http://localhost:11434` e o modelo `qwen2.5-coder:14b`.
+Para escolher outro modelo compatível com ferramentas, configure as variáveis
+antes de abrir o programa (o modelo deve estar instalado no Ollama):
+
+```bash
+# Linux/macOS
+export CALCULADOR_OLLAMA_MODELO="qwen2.5-coder:14b"
+export CALCULADOR_OLLAMA_URL="http://localhost:11434"
+python calculador.py
+```
+
+```powershell
+# Windows PowerShell
+$env:CALCULADOR_OLLAMA_MODELO="qwen2.5-coder:14b"
+$env:CALCULADOR_OLLAMA_URL="http://localhost:11434"
+python calculador.py
+```
+
+As variáveis são lidas na abertura. O assistente envia mensagens e contexto
+financeiro para o endereço configurado; por padrão, o serviço é local.
+As respostas do modelo podem conter erros: confira os lançamentos. Sem o serviço
+ou o modelo disponível, o assistente mostra uma mensagem de erro; as demais
+funções continuam disponíveis.
+
+---
+
+## 🧪 Como verificar o projeto
+
+Depois de instalar as dependências:
+
+```bash
+python test_calculador.py
+python -m unittest discover -v
+```
+
+A primeira suíte verifica cálculos, parcelas, caixinhas, imagens e validações do
+assistente. A descoberta de testes verifica os formatos JSON atuais e antigos, estruturas
+inválidas, números não finitos e falhas de acesso, backup e gravação. Os testes
+usam arquivos temporários e respostas HTTP simuladas. Também verificam a
+configuração do assistente e a rejeição de entradas inválidas na interface.
+Não é necessário iniciar Ollama para executá-los.
+
+O workflow **Testes** executa as duas suítes em pull requests, no Windows e no
+Ubuntu, com Python 3.10 e 3.13. O workflow **Aplicativos** também executa as duas
+antes de gerar os executáveis. Os testes automatizados não substituem a
+conferência visual das abas, dos gráficos e dos diálogos.
+
+### Proteção dos arquivos de dados
+
+São aceitos o formato atual e os formatos antigos (lista de gastos ou orçamento
+único). Lançamentos precisam ter data válida, valor numérico finito e não
+negativo e categoria/fonte em texto. Caixinhas, orçamentos e parcelas também
+são validados; campos extras dos lançamentos são mantidos.
+
+Se o JSON estiver corrompido ou sua estrutura for inválida, o arquivo inteiro é
+preservado como `gastos.json.corrompido-<data>-<identificador>` na mesma pasta,
+e o aplicativo inicia com dados vazios. Nenhum lançamento é filtrado ou apagado
+individualmente. Para recuperar os dados, guarde essa cópia, corrija o problema
+e restaure o conteúdo para `gastos.json` com o aplicativo fechado.
+
+Se não for possível ler o arquivo por falta de permissão ou preservar a cópia,
+o erro é propagado, impedindo que o aplicativo inicie com dados vazios sobre um
+arquivo sem proteção. Ao salvar, os dados são validados antes da gravação, e a
+troca do arquivo ocorre somente depois da escrita e sincronização do temporário.
+As cópias de recuperação e o temporário ficam fora do Git.
 
 ---
 
@@ -137,10 +221,16 @@ Depois procure por **Calculador de Gastos** nos aplicativos. Os dados ficam em
 
 ```
 calculador-gastos/
-├── calculador.py          # Aplicação (interface + lógica + gráficos)
-├── test_calculador.py     # Checagens da camada de dados (JSON)
+├── calculador.py          # Interface, gráficos e ponto de entrada
+├── configuracao.py        # Categorias, opções e paleta compartilhadas
+├── dominio.py             # Cálculos, datas, parcelas e formatação
+├── armazenamento.py       # Validação, migração e persistência JSON
+├── assistente.py          # Ferramentas, validação e cliente do Ollama
+├── test_calculador.py     # Regressões de cálculos, assistente e gráficos
+├── test_armazenamento.py  # Regressões de validação e proteção dos arquivos
+├── test_integracao.py     # Cliente Ollama e validações de entrada da interface
 ├── empacotamento/         # instalar-ubuntu.sh (atalho no menu do Ubuntu)
-├── .github/workflows/     # gera os aplicativos Windows e Ubuntu
+├── .github/workflows/     # testes do PR e geração de aplicativos
 ├── requirements.txt       # Dependências do projeto
 ├── gastos.exemplo.json    # Dados fictícios de exemplo
 ├── gastos.json            # Seus dados reais (gerado no 1º uso, fora do Git)

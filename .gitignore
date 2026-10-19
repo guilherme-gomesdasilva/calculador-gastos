@@ -13,6 +13,8 @@ env/
 # ---- Dados pessoais do usuário (não versionar) ----
 # Os gastos reais ficam fora do repositório. Use gastos.exemplo.json como base.
 gastos.json
+gastos.json.tmp
+gastos.json.corrompido-*
 
 # ---- Logos dos bancos (marcas registradas, cada um coloca os seus) ----
 assets/logos/*

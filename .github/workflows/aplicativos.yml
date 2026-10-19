@@ -40,7 +40,9 @@ jobs:
           pip install -r requirements.txt pyinstaller
 
       - name: Testes
-        run: python test_calculador.py
+        run: |
+          python test_calculador.py
+          python -m unittest discover -v
 
       - name: Gerar executável
         # --onedir (padrão) abre mais rápido e dá menos alarme falso de antivírus
