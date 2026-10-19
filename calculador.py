@@ -11,8 +11,8 @@ Controle de despesas pessoais com interface moderna em CustomTkinter:
   orçamento x gasto x restante, barras por cartão) e aba de Evolução.
 - Feedback via "toasts" discretos (sem messagebox do sistema).
 
-A lógica de cálculo e a geração dos gráficos foram mantidas; apenas a
-camada visual foi modernizada.
+Interface e gráficos da aplicação. Cálculos, armazenamento e assistente
+ficam em módulos próprios, importados aqui para manter compatibilidade.
 
 Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
     .venv/bin/python calculador.py
@@ -20,19 +20,17 @@ Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
 
 import bisect
 import calendar
-import difflib
-import itertools
+import copy
 import json
+import math
 import os
 import queue
-import re
 import sys
 import threading
 import tkinter as tk
 import unicodedata
-import urllib.request
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime as datetime, timedelta
 from functools import lru_cache
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -52,6 +50,114 @@ from matplotlib.patches import Rectangle
 from matplotlib.transforms import Bbox, TransformedBbox
 from PIL import Image, ImageDraw, ImageFont
 
+
+# Reexportações explícitas mantêm a API anterior de calculador.py.
+from configuracao import (
+    ACCENT as ACCENT,
+    ACCENT_HOVER as ACCENT_HOVER,
+    APPS_DELIVERY as APPS_DELIVERY,
+    BG as BG,
+    BORDA as BORDA,
+    CARD as CARD,
+    CARD2 as CARD2,
+    CARTAO_CORES as CARTAO_CORES,
+    CARTAO_EMOJI as CARTAO_EMOJI,
+    CARTAO_PADRAO as CARTAO_PADRAO,
+    CARTOES as CARTOES,
+    CATEGORIAS as CATEGORIAS,
+    CATEGORIAS_DIA as CATEGORIAS_DIA,
+    CATEGORIAS_PARCELADAS as CATEGORIAS_PARCELADAS,
+    CATEGORIA_CAIXINHA as CATEGORIA_CAIXINHA,
+    CATEGORIA_CORES as CATEGORIA_CORES,
+    CATEGORIA_FATURA as CATEGORIA_FATURA,
+    CATEGORIA_PARCELAMENTO as CATEGORIA_PARCELAMENTO,
+    CATEGORIA_TRANSPORTE as CATEGORIA_TRANSPORTE,
+    COLUNAS_ENTRADAS as COLUNAS_ENTRADAS,
+    CONTAS_FIXAS as CONTAS_FIXAS,
+    COR_GASTO as COR_GASTO,
+    COR_NEG as COR_NEG,
+    COR_ORC as COR_ORC,
+    COR_POS as COR_POS,
+    COR_RENDA as COR_RENDA,
+    COR_RENDA_HOVER as COR_RENDA_HOVER,
+    COR_RESTANTE as COR_RESTANTE,
+    DIAS_SEMANA as DIAS_SEMANA,
+    FONTES_EMOJI as FONTES_EMOJI,
+    FONTES_RENDA as FONTES_RENDA,
+    FONTE_CAIXINHA as FONTE_CAIXINHA,
+    FONTE_DELIVERY as FONTE_DELIVERY,
+    FONTE_PADRAO as FONTE_PADRAO,
+    GRID as GRID,
+    INSTITUICOES as INSTITUICOES,
+    INSTITUICOES_TRANSPORTE as INSTITUICOES_TRANSPORTE,
+    MAX_CENTAVOS as MAX_CENTAVOS,
+    MESES_ABREV as MESES_ABREV,
+    MESES_PT as MESES_PT,
+    OUTRA_QUANTIDADE as OUTRA_QUANTIDADE,
+    POUPANCAS as POUPANCAS,
+    SUB as SUB,
+    SUBCATEGORIAS as SUBCATEGORIAS,
+    TEXTO as TEXTO,
+    ZEBRA as ZEBRA,
+    outros_por_ultimo as outros_por_ultimo,
+    quantidade_parcelas as quantidade_parcelas
+)
+from dominio import (
+    _chave as _chave,
+    acumulado_poupancas as acumulado_poupancas,
+    centavos_do_texto as centavos_do_texto,
+    cor_categoria as cor_categoria,
+    descricao_parcela as descricao_parcela,
+    dia_de_data as dia_de_data,
+    distribuir_parcelas as distribuir_parcelas,
+    e_conta_fixa as e_conta_fixa,
+    formatar_moeda as formatar_moeda,
+    formatar_numero as formatar_numero,
+    instituicao_do_rotulo as instituicao_do_rotulo,
+    label_mes_curto as label_mes_curto,
+    mes_atual_chave as mes_atual_chave,
+    mes_de_data as mes_de_data,
+    mes_do_gasto as mes_do_gasto,
+    mesma_renda as mesma_renda,
+    movimento_caixinha as movimento_caixinha,
+    nome_de_caixinha as nome_de_caixinha,
+    nome_mes as nome_mes,
+    novo_lancamento as novo_lancamento,
+    rotulo_categoria as rotulo_categoria,
+    saldos_caixinhas as saldos_caixinhas,
+    somar_meses as somar_meses,
+    subopcoes as subopcoes,
+    totais_por_cartao as totais_por_cartao,
+    totais_por_categoria as totais_por_categoria,
+    totais_por_dia as totais_por_dia,
+    totais_renda as totais_renda,
+    valor_digitado as valor_digitado
+)
+from assistente import (
+    FERRAMENTAS as FERRAMENTAS,
+    FERRAMENTA_LANCAR as FERRAMENTA_LANCAR,
+    FERRAMENTA_SALARIO as FERRAMENTA_SALARIO,
+    MAX_RODADAS as MAX_RODADAS,
+    OLLAMA_MODELO as OLLAMA_MODELO,
+    OLLAMA_URL as OLLAMA_URL,
+    PEDE_CRIAR as PEDE_CRIAR,
+    PEDE_RENOMEAR as PEDE_RENOMEAR,
+    _MES as _MES,
+    _achar as _achar,
+    _ferramenta as _ferramenta,
+    _valor_do_modelo as _valor_do_modelo,
+    achar_lancamentos as achar_lancamentos,
+    chamadas_de_ferramenta as chamadas_de_ferramenta,
+    chamar_ollama as chamar_ollama,
+    ferramentas_para as ferramentas_para,
+    lancamento_do_assistente as lancamento_do_assistente,
+    mes_do_modelo as mes_do_modelo,
+    numeros_do_texto as numeros_do_texto,
+    pede_para_apagar as pede_para_apagar,
+    salario_do_assistente as salario_do_assistente
+)
+from armazenamento import carregar_dados as _ler_dados, salvar_dados as _gravar_dados
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if getattr(sys, "frozen", False):
     # executável (PyInstaller): a pasta do programa pode ser temporária ou sem
@@ -69,226 +175,7 @@ else:
 DATA_FILE = os.path.join(PASTA_DADOS, "gastos.json")
 ICONE = os.path.join(BASE_DIR, "assets", "icone.png")  # vai junto no executável
 
-def outros_por_ultimo(opcoes):
-    """Deixa "Outro"/"Outros"/"Outra" no fim de uma lista (ou dict) de opções,
-    mesmo que novas opções sejam escritas depois dele; o resto mantém a ordem."""
-    def e_outro(nome):
-        return nome.split()[0].lower() in {"outro", "outros", "outra"}
-    if isinstance(opcoes, dict):
-        return dict(sorted(opcoes.items(), key=lambda item: e_outro(item[0])))
-    return sorted(opcoes, key=e_outro)
 
-
-CATEGORIAS = outros_por_ultimo([
-    "Alimentação",
-    "Aluguel",
-    "Luz",
-    "Água",
-    "Gás",
-    "Internet/Telefone",
-    "Fatura de Cartão",
-    "Parcelamento de Compras",
-    "Transporte",
-    "Saúde",
-    "Educação",
-    "Lazer",
-    "Outros",
-    "Financiamento/Empréstimo",
-    "Reserva de Emergência",
-    "Investimentos",
-])
-
-# Cor de cada categoria (usada nos gráficos) - vivas, funcionam nos dois temas
-CATEGORIA_CORES = {
-    "Alimentação": "#6366F1",
-    "Aluguel": "#8B5CF6",
-    "Luz": "#F59E0B",
-    "Água": "#06B6D4",
-    "Gás": "#EF4444",
-    "Internet/Telefone": "#0EA5E9",
-    "Fatura de Cartão": "#4338CA",
-    "Parcelamento de Compras": "#F9A8D4",
-    "Transporte": "#14B8A6",
-    "Saúde": "#EC4899",
-    "Educação": "#F97316",
-    "Lazer": "#22C55E",
-    "Outros": "#94A3B8",
-    "Financiamento/Empréstimo": "#92400E",
-    "Reserva de Emergência": "#0E7490",
-    "Investimentos": "#059669",
-}
-
-# Aba "Reserva, Investimentos e Caixinhas": guardar = gasto na categoria; tirar = renda na fonte
-# poupança -> (categoria do aporte, fonte de renda do resgate)
-POUPANCAS = {
-    "reserva": ("Reserva de Emergência", "Resgate da Reserva"),
-    "investimentos": ("Investimentos", "Resgate de Investimentos"),
-}
-
-# Caixinhas (objetivos com nome): guardar é um gasto na categoria, retirar é uma
-# renda na fonte, os dois com "caixinha": nome. O saldo é a soma, como na reserva.
-CATEGORIA_CAIXINHA = "Caixinhas"
-FONTE_CAIXINHA = "Resgate de Caixinha"
-CATEGORIA_CORES[CATEGORIA_CAIXINHA] = "#FACC15"
-
-# Compras parceladas: cada parcela é um gasto no seu mês (ver distribuir_parcelas)
-CATEGORIA_PARCELAMENTO = "Parcelamento de Compras"
-OUTRA_QUANTIDADE = "Outra…"
-# categoria parcelada -> (quantidades rápidas no menu, máximo aceito em "Outra…")
-CATEGORIAS_PARCELADAS = {
-    CATEGORIA_PARCELAMENTO: ([f"{n}x" for n in (2, 3, 4, 5, 6, 10, 12)], 48),
-    "Financiamento/Empréstimo": ([f"{n}x" for n in (12, 24, 36, 48)], 420),
-}
-# aba Diário: gastos do dia a dia (parcelamentos continuam na aba Lançamentos)
-CATEGORIAS_DIA = [c for c in CATEGORIAS if c not in CATEGORIAS_PARCELADAS]
-
-
-def quantidade_parcelas(texto, maximo):
-    """'12x' ou '12' -> 12, se estiver entre 2 e `maximo`; senão None."""
-    texto = (texto or "").strip().lower().removesuffix("x").strip()
-    if not texto.isdigit():
-        return None
-    n = int(texto)
-    return n if 2 <= n <= maximo else None
-
-# Categorias consideradas "contas fixas" (recorrentes todo mês)
-CONTAS_FIXAS = [
-    "Aluguel",
-    "Luz",
-    "Água",
-    "Gás",
-    "Internet/Telefone",
-    "Educação",
-    "Financiamento/Empréstimo",
-]
-
-# Formas de pagamento / cartões
-CARTOES = outros_por_ultimo([
-    "Dinheiro",
-    "Pix",
-    "Débito",
-    "Cartão de Crédito",
-    "Outro",
-])
-CARTAO_PADRAO = "Outro"
-
-# Instituições das faturas de cartão, com a cor característica de cada uma
-CATEGORIA_FATURA = "Fatura de Cartão"
-INSTITUICOES = outros_por_ultimo({
-    "Nubank": "#820AD1",
-    "Itaú": "#EC7000",
-    "Bradesco": "#CC092F",
-    "Santander": "#EC0000",
-    "Banco do Brasil": "#F9DD16",
-    "Caixa": "#005CA9",
-    "Inter": "#FF7A00",
-    "Mercado Pago": "#00B1EA",
-    "PicPay": "#21C25E",
-    "Outra": "#94A3B8",
-})
-
-#Formas de transporte (usadas em gastos de transporte, para gráficos e filtros)
-CATEGORIA_TRANSPORTE = "Transporte"
-INSTITUICOES_TRANSPORTE = outros_por_ultimo({
-    "Ônibus": "#84CC16",
-    "Metrô": "#D946EF",
-    "Trem": "#C2855A",
-    "Táxi": "#818CF8",
-    "Uber / 99": "#78716C",
-    "Carro Moto/ Combustível": "#FB7185",
-    "Outro": "#E879F9",
-})
-
-# Categorias que abrem um 2º seletor no formulário:
-# categoria -> (prefixo no rótulo/gráficos, título do seletor, opções com cor)
-SUBCATEGORIAS = {
-    CATEGORIA_FATURA: ("Fatura ", "INSTITUIÇÃO", INSTITUICOES),
-    CATEGORIA_TRANSPORTE: ("Transporte - ", "TIPO DE TRANSPORTE",
-                           INSTITUICOES_TRANSPORTE),
-}
-
-# Formas de renda extra (entradas além do orçamento do mês)
-FONTES_RENDA = outros_por_ultimo([
-    "Freelance",
-    "Vendas",
-    "Investimentos",
-    "Reembolso",
-    "Presente",
-    "13º / Férias",
-    "Delivery / Apps",
-    "Outros",
-    "Resgate da Reserva",
-    "Resgate de Investimentos",
-])
-FONTE_PADRAO = "Outros"
-
-# Apps da fonte "Delivery / Apps", com a cor da marca (logos em assets/logos)
-FONTE_DELIVERY = "Delivery / Apps"
-APPS_DELIVERY = {
-    "iFood": "#EA1D2C",
-    "99": "#FFD200",
-    "Uber": "#000000",
-    "Mercado Livre": "#FFE600",
-    "Shopee": "#EE4D2D",
-    "Keeta": "#FFD100",
-    "Rappi": "#FF441F",
-    "Lalamove": "#F16622",
-    "Loggi": "#00B4FC",
-    "Amazon Flex": "#FF9900",
-    "Borzo": "#94A3B8",
-    "inDrive": "#9CE424",
-    "Zé Delivery": "#FFE000",
-    "aiqfome": "#7B1FA2",
-    "Magalu": "#0C84FC",
-}
-COLUNAS_ENTRADAS = 6  # cards por linha no topo (salário, rendas e apps com valor)
-
-# Emoji de cada forma de pagamento (gráfico de formas de pagamento)
-CARTAO_EMOJI = {
-    "Dinheiro": "💵",
-    "Pix": "💠",
-    "Débito": "🏧",
-    "Cartão de Crédito": "💳",
-    "Outro": "🧾",
-}
-# O matplotlib não desenha emoji colorido: ele vira imagem com a 1ª fonte que existir
-FONTES_EMOJI = [
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-    "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
-    "C:/Windows/Fonts/seguiemj.ttf",
-    "/System/Library/Fonts/Apple Color Emoji.ttc",
-]
-
-# Cor de cada forma de pagamento (usada no gráfico)
-CARTAO_CORES = {
-    "Dinheiro": "#22C55E",
-    "Pix": "#06B6D4",
-    "Débito": "#6366F1",
-    "Cartão de Crédito": "#EC4899",
-    "Outro": "#94A3B8",
-}
-
-# --------------------------------------------------------------- paleta ---
-# Cores em tupla (claro, escuro): resolvidas conforme o tema atual.
-ACCENT = "#3B82F6"        # cor de destaque (azul)
-ACCENT_HOVER = "#2563EB"
-COR_GASTO = "#F59E0B"     # âmbar
-COR_POS = "#22C55E"       # verde
-COR_RENDA = "#10B981"     # verde-esmeralda (renda extra)
-COR_RENDA_HOVER = "#0E9F6E"
-COR_NEG = "#EF4444"       # vermelho
-COR_ORC = ACCENT
-
-BG = ("#EEF1F8", "#15171C")       # fundo geral
-CARD = ("#FFFFFF", "#20242C")     # cards
-CARD2 = ("#F1F3FB", "#282D37")    # campos / superfícies secundárias
-TEXTO = ("#1F2430", "#E7E9EE")    # texto principal
-SUB = ("#75809A", "#9AA3B2")      # texto secundário / rótulos
-BORDA = ("#E2E6F0", "#333844")    # bordas
-GRID = ("#EEF0F6", "#333844")     # gridlines dos gráficos
-ZEBRA = ("#F7F8FC", "#262B34")    # linha alternada da tabela
-COR_RESTANTE = "#166534"  # verde mais escuro que os demais verdes dos gráficos
 
 
 def _cor(tupla):
@@ -297,174 +184,20 @@ def _cor(tupla):
 
 
 # =========================================================== dados / util ===
-MESES_PT = [
-    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
-]
-
-MESES_ABREV = [
-    "jan", "fev", "mar", "abr", "mai", "jun",
-    "jul", "ago", "set", "out", "nov", "dez",
-]
-
-DIAS_SEMANA = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 
-def label_mes_curto(chave):
-    """Converte 'AAAA-MM' em 'set/26'."""
-    try:
-        ano, mes = chave.split("-")
-        return f"{MESES_ABREV[int(mes) - 1]}/{ano[2:]}"
-    except (ValueError, IndexError):
-        return chave
-
-
-def mes_de_data(texto):
-    """Extrai a chave de mês 'AAAA-MM' de uma data 'dd/mm/aaaa'."""
-    partes = (texto or "").strip().split("/")
-    if len(partes) == 3:
-        try:
-            _dia, mes, ano = int(partes[0]), int(partes[1]), int(partes[2])
-            if 1 <= mes <= 12:
-                return f"{ano:04d}-{mes:02d}"
-        except ValueError:
-            pass
-    return None
-
-
-def mes_do_gasto(gasto):
-    """Chave de mês de um gasto (a partir da sua data)."""
-    return mes_de_data(gasto.get("data", ""))
-
-
-def dia_de_data(texto):
-    """Extrai o dia (int) de uma data 'dd/mm/aaaa'. Retorna 1 se não der."""
-    partes = (texto or "").strip().split("/")
-    try:
-        return int(partes[0])
-    except (ValueError, IndexError):
-        return 1
-
-
-def nome_mes(chave):
-    """Converte 'AAAA-MM' em algo como 'Setembro 2026'."""
-    try:
-        ano, mes = chave.split("-")
-        return f"{MESES_PT[int(mes) - 1]} {ano}"
-    except (ValueError, IndexError):
-        return chave
-
-
-def mes_atual_chave():
-    hoje = date.today()
-    return f"{hoje.year:04d}-{hoje.month:02d}"
-
-
-def carregar_dados():
-    """Lê os orçamentos (por mês), os gastos, as rendas extras e as caixinhas do JSON.
-
-    Aceita vários formatos, garantindo compatibilidade:
-    - novo: {"orcamentos": {...}, "gastos": [...], "rendas": [...]}
-    - anterior: {"orcamento": valor_único, "gastos": [...]}
-    - antigo: apenas uma lista de gastos.
-    Retorna (orcamentos: dict, gastos: list, rendas: list, caixinhas: list).
-    """
-    if not os.path.exists(DATA_FILE):
-        return {}, [], [], []
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            dados = json.load(f)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        # guarda o arquivo estragado ao lado: a próxima gravação não apaga os dados
-        try:
-            os.replace(DATA_FILE, f"{DATA_FILE}.corrompido-{datetime.now():%Y%m%d-%H%M%S}")
-        except OSError:
-            pass
-        return {}, [], [], []
-
-    if isinstance(dados, list):  # formato antigo (lista pura)
-        return {}, dados, [], []
-
-    gastos = dados.get("gastos", [])
-    rendas = dados.get("rendas", [])
-    caixinhas = dados.get("caixinhas", [])
-    if "orcamentos" in dados:  # formato novo (por mês)
-        orcamentos = {k: float(v) for k, v in dados["orcamentos"].items()}
-        return orcamentos, gastos, rendas, caixinhas
-
-    # formato anterior (orçamento único) -> aplica o valor a cada mês existente
-    orcamentos = {}
-    valor = float(dados.get("orcamento", 0.0))
-    if valor > 0:
-        for gasto in gastos:
-            chave = mes_do_gasto(gasto) or mes_atual_chave()
-            orcamentos[chave] = valor
-    return orcamentos, gastos, rendas, caixinhas
+def carregar_dados(ao_preservar=None):
+    """Lê os dados no caminho usado pela aplicação."""
+    return _ler_dados(DATA_FILE, ao_preservar)
 
 
 def salvar_dados(orcamentos, gastos, rendas, caixinhas):
-    """Grava orçamentos por mês, gastos, rendas extras e caixinhas no arquivo JSON.
-
-    Grava num arquivo temporário e troca de uma vez: se o computador desligar no
-    meio, o arquivo antigo continua inteiro.
-    """
-    temporario = DATA_FILE + ".tmp"
-    with open(temporario, "w", encoding="utf-8") as f:
-        json.dump(
-            {"orcamentos": orcamentos, "gastos": gastos, "rendas": rendas,
-             "caixinhas": caixinhas},
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temporario, DATA_FILE)
+    """Salva no caminho usado pela aplicação, com troca atômica."""
+    return _gravar_dados(DATA_FILE, orcamentos, gastos, rendas, caixinhas)
 
 
-MAX_CENTAVOS = 99_999_999_999  # R$ 999.999.999,99: limite dos campos de dinheiro
-
-
-def formatar_numero(valor):
-    """Número no formato brasileiro, sem o 'R$': 1234.5 -> '1.234,50'."""
-    texto = f"{valor:,.2f}"
-    return texto.replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def centavos_do_texto(texto):
-    """Só os dígitos 0-9 viram centavos: '1.234,56' -> 123456, 'abc' -> 0."""
-    digitos = "".join(ch for ch in texto if ch in "0123456789")
-    return min(int(digitos or 0), MAX_CENTAVOS)
-
-
-def formatar_moeda(valor):
-    """Formata um número como moeda brasileira: 1234.5 -> 'R$ 1.234,50'."""
-    texto = formatar_numero(valor)
-    return f"R$ {texto}"
-
-
-def rotulo_categoria(gasto):
-    """Categoria para exibição: 'Fatura Nubank', 'Transporte - Ônibus'..."""
-    sub = SUBCATEGORIAS.get(gasto["categoria"])
-    inst = gasto.get("instituicao")
-    if sub and inst:
-        return sub[0] + inst
-    return gasto["categoria"]
-
-
-def instituicao_do_rotulo(rotulo):
-    """'Fatura Nubank' -> 'Nubank'; qualquer outro rótulo -> None."""
-    inst = rotulo.removeprefix("Fatura ")
-    return inst if inst != rotulo and inst in INSTITUICOES else None
-
-
-def cor_categoria(rotulo):
-    """Cor de um rótulo: subcategorias (banco, transporte) usam a própria cor."""
-    for prefixo, _titulo, opcoes in SUBCATEGORIAS.values():
-        nome = rotulo.removeprefix(prefixo)
-        if nome != rotulo and nome in opcoes:
-            return opcoes[nome]
-    return CATEGORIA_CORES.get(rotulo, "#94A3B8")
+class ErroAoSalvar(Exception):
+    """A gravação falhou e a alteração foi desfeita; interrompe a ação em curso."""
 
 
 def arquivo_logo(instituicao, extensao=".png"):
@@ -494,24 +227,6 @@ def logo_ctk(nome, altura):
     claro, escuro = (Image.fromarray(logo_sobre_cor(arr, cor)) for cor in CARD)
     return ctk.CTkImage(light_image=claro, dark_image=escuro,
                         size=(round(img.width * altura / img.height), altura))
-
-
-def mesma_renda(renda, mes, fonte, app=None):
-    """A renda é do mês e da fonte (e do app, no delivery) indicados?"""
-    return (mes_do_gasto(renda) == mes and renda.get("app") == app
-            and renda.get("fonte", FONTE_PADRAO) == fonte)
-
-
-def totais_renda(rendas):
-    """({app: total} de cada app de delivery, total das demais rendas extras)."""
-    por_app = dict.fromkeys(APPS_DELIVERY, 0.0)
-    outras = 0.0
-    for renda in rendas:
-        if renda.get("fonte") == FONTE_DELIVERY and renda.get("app") in por_app:
-            por_app[renda["app"]] += renda["valor"]
-        else:
-            outras += renda["valor"]
-    return por_app, outras
 
 
 class _HandlerLogo(HandlerBase):
@@ -688,458 +403,6 @@ def legenda_com_logos(ax, handles, labels, imagem_de=logo_do_rotulo, altura=1.6,
     ax.legend(handles, labels, handler_map=mapa, **opcoes)
 
 
-def acumulado_poupancas(gastos, rendas, ate=None):
-    """Aportes (gastos) menos resgates (rendas) de cada poupança, mês a mês.
-
-    Retorna (meses, saldo, movimento): `meses` vai do 1º mês com movimento até o
-    último (ou até `ate`, se for depois), sem pular meses; `saldo[nome]` é o
-    acumulado em cada mês e `movimento[nome]` o que entrou/saiu no mês.
-    """
-    por_mes = {nome: {} for nome in POUPANCAS}
-    for nome, (categoria, fonte) in POUPANCAS.items():
-        for item, sinal in [(g, 1) for g in gastos if g["categoria"] == categoria] + \
-                           [(r, -1) for r in rendas if r.get("fonte") == fonte]:
-            mes = mes_do_gasto(item)
-            if mes:
-                por_mes[nome][mes] = por_mes[nome].get(mes, 0.0) + sinal * item["valor"]
-    com_movimento = sorted({m for d in por_mes.values() for m in d})
-    if not com_movimento:
-        return [], {n: [] for n in POUPANCAS}, {n: [] for n in POUPANCAS}
-    meses, mes = [], com_movimento[0]
-    while mes <= max(com_movimento[-1], ate or ""):
-        meses.append(mes)
-        mes = mes_de_data(somar_meses(f"01/{mes[5:]}/{mes[:4]}", 1))
-    movimento = {n: [d.get(m, 0.0) for m in meses] for n, d in por_mes.items()}
-    saldo = {n: list(itertools.accumulate(v)) for n, v in movimento.items()}
-    return meses, saldo, movimento
-
-
-def somar_meses(data_texto, meses):
-    """'31/01/2026' + 1 mês -> '28/02/2026' (o dia é limitado ao fim do mês)."""
-    dia, mes, ano = (int(parte) for parte in data_texto.strip().split("/"))
-    ano, mes = divmod(ano * 12 + mes - 1 + meses, 12)
-    mes += 1
-    return f"{min(dia, calendar.monthrange(ano, mes)[1]):02d}/{mes:02d}/{ano:04d}"
-
-
-def descricao_parcela(gasto):
-    """'Parcelamento de Compras 3/12'."""
-    return f"{rotulo_categoria(gasto)} {gasto['parcela']}/{gasto['parcelas']}"
-
-
-def e_conta_fixa(gasto):
-    """Copiada mês a mês? Parcelados não: suas parcelas vêm de distribuir_parcelas."""
-    return gasto["categoria"] in CONTAS_FIXAS and not gasto.get("compra")
-
-
-def saldos_caixinhas(caixinhas, gastos, rendas):
-    """{nome: guardado - retirado} de cada caixinha, na ordem em que foram criadas."""
-    saldos = {cx["nome"]: 0.0 for cx in caixinhas}
-    for item, sinal in [(g, 1) for g in gastos] + [(r, -1) for r in rendas]:
-        if item.get("caixinha") in saldos:
-            saldos[item["caixinha"]] += sinal * item["valor"]
-    return saldos
-
-
-def nome_de_caixinha(nome, caixinhas, atual=None):
-    """(nome limpo, None) se puder usar, ou (None, erro). Não repete nome, sem
-    ligar para maiúsculas/acentos; `atual` é o nome da caixinha sendo renomeada."""
-    nome = " ".join(str(nome or "").split())[:40]
-    if not nome:
-        return None, "Erro: dê um nome para a caixinha."
-    if any(_chave(cx["nome"]) == _chave(nome) and cx["nome"] != atual for cx in caixinhas):
-        return None, f"Erro: já existe uma caixinha chamada {nome}."
-    return nome, None
-
-
-def movimento_caixinha(nome, valor, guardar, data_texto):
-    """Guardar: gasto na categoria Caixinhas; retirar: renda de resgate."""
-    item = {"data": data_texto, "valor": valor, "caixinha": nome,
-            "descricao": f"Caixinha {nome}"}
-    if guardar:
-        item.update(categoria=CATEGORIA_CAIXINHA, cartao=CARTAO_PADRAO)
-    else:
-        item["fonte"] = FONTE_CAIXINHA
-    return item
-
-
-def distribuir_parcelas(gastos):
-    """Cria, nos meses seguintes, as parcelas que faltam de cada compra/empréstimo.
-
-    As parcelas de uma compra têm o mesmo "compra" (id). A de menor número serve
-    de base; as que já existem não são recriadas. Retorna quantas criou.
-    """
-    por_compra = {}
-    for gasto in gastos:
-        if gasto.get("compra"):
-            por_compra.setdefault(gasto["compra"], []).append(gasto)
-    novas = []
-    for itens in por_compra.values():
-        base = min(itens, key=lambda g: g["parcela"])
-        if mes_do_gasto(base) is None:  # data inválida: não dá para contar meses
-            continue
-        existentes = {g["parcela"] for g in itens}
-        for numero in range(1, base["parcelas"] + 1):
-            if numero in existentes:
-                continue
-            nova = {**base, "parcela": numero,
-                    "data": somar_meses(base["data"], numero - base["parcela"])}
-            nova["descricao"] = descricao_parcela(nova)
-            novas.append(nova)
-    gastos.extend(novas)
-    return len(novas)
-
-
-def totais_por_categoria(gastos):
-    """Retorna um dict {categoria: total} apenas com categorias que têm gasto."""
-    totais = {}
-    for gasto in gastos:
-        cat = rotulo_categoria(gasto)
-        totais[cat] = totais.get(cat, 0.0) + gasto["valor"]
-    return totais
-
-
-def totais_por_cartao(gastos):
-    """Retorna um dict {cartão: total} apenas com formas de pagamento usadas."""
-    totais = {}
-    for gasto in gastos:
-        cartao = gasto.get("cartao", CARTAO_PADRAO)
-        totais[cartao] = totais.get(cartao, 0.0) + gasto["valor"]
-    return totais
-
-
-def subopcoes(gasto, escolha):
-    """Opções do 2º seletor (banco/transporte do gasto, app do ganho), ou None."""
-    if gasto:
-        return SUBCATEGORIAS[escolha][2] if escolha in SUBCATEGORIAS else None
-    return APPS_DELIVERY if escolha == FONTE_DELIVERY else None
-
-
-def novo_lancamento(gasto, valor, data_texto, escolha, sub=None, cartao=None):
-    """Monta o gasto (categoria, pagamento) ou a renda (fonte, app) de um dia."""
-    item = {"data": data_texto, "valor": valor}
-    if gasto:
-        item.update(categoria=escolha, cartao=cartao or CARTAO_PADRAO)
-        if sub:
-            item["instituicao"] = sub
-        item["descricao"] = rotulo_categoria(item)
-    else:
-        item.update(descricao=sub or escolha, fonte=escolha)
-        if sub:
-            item["app"] = sub
-    return item
-
-
-# ------------------------------------------------------------ assistente ---
-# Modelo local do Ollama (https://ollama.com): troque por outro que suporte
-# ferramentas. O "qwen2.5-coder:7b" responde em 1-5 s, mas erra somas e datas;
-# o 14b acertou todos os testes (2-15 s por mensagem).
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODELO = "qwen2.5-coder:14b"
-MAX_RODADAS = 4  # tentativas do modelo (ex.: corrigir categoria inválida) por mensagem
-
-FERRAMENTA_LANCAR = {"type": "function", "function": {
-    "name": "lancar",
-    "description": "Registra no app um gasto ou um ganho que o usuário contou. Uma "
-                   "chamada por item: \"12 de uber e 6 de ônibus\" são duas. Ganho em app "
-                   "(iFood, Uber, 99...) é categoria Delivery / Apps com o app em detalhe.",
-    "parameters": {"type": "object", "required": ["tipo", "valor", "categoria"], "properties": {
-        "tipo": {"type": "string", "enum": ["gasto", "ganho"]},
-        "valor": {"type": "number", "description": "valor em reais, ex.: 25.9"},
-        "data": {"type": "string", "description": "dd/mm/aaaa; omita para hoje"},
-        "categoria": {"type": "string", "description":
-                      "gasto: uma de " + ", ".join(CATEGORIAS_DIA)
-                      + ". ganho: uma de " + ", ".join(FONTES_RENDA)},
-        "detalhe": {"type": "string", "description":
-                    "obrigatório em Fatura de Cartão (banco), Transporte (tipo) e "
-                    "Delivery / Apps (app: " + ", ".join(APPS_DELIVERY) + ")"},
-        "pagamento": {"type": "string", "enum": CARTOES},
-    }}}}
-
-
-FERRAMENTA_SALARIO = {"type": "function", "function": {
-    "name": "salario",
-    "description": "Define o salário do mês (troca o que havia). Salário não é ganho: "
-                   "use esta ferramenta, nunca lancar, quando o usuário falar de salário. "
-                   "Para apagar o salário use limpar com oque=salario.",
-    "parameters": {"type": "object", "required": ["valor"], "properties": {
-        "valor": {"type": "number", "description": "valor em reais, ex.: 2800"},
-        "mes": {"type": "string", "description": "mm/aaaa; omita para o mês aberto no app"},
-    }}}}
-
-
-def _ferramenta(nome, descricao, propriedades=None, obrigatorios=()):
-    return {"type": "function", "function": {
-        "name": nome, "description": descricao,
-        "parameters": {"type": "object", "required": list(obrigatorios),
-                       "properties": propriedades or {}}}}
-
-
-_MES = {"type": "string", "description": "mm/aaaa; omita para o mês aberto no app"}
-FERRAMENTAS = [
-    FERRAMENTA_LANCAR,
-    FERRAMENTA_SALARIO,
-    _ferramenta("limpar", "Apaga de uma vez os gastos, as rendas extras ou o salário de "
-                "um mês. O app pede confirmação ao usuário.",
-                {"oque": {"type": "string", "enum": ["gastos", "rendas", "salario"]},
-                 "mes": _MES}, ["oque"]),
-    _ferramenta("remover", "Apaga UM lançamento do mês (gasto ou ganho), achado pelo "
-                "valor e/ou pelo texto (categoria, app, fonte). O app pede confirmação.",
-                {"tipo": {"type": "string", "enum": ["gasto", "ganho"]},
-                 "valor": {"type": "number"},
-                 "texto": {"type": "string", "description": "ex.: uber, ifood, luz"},
-                 "data": {"type": "string", "description": "dd/mm/aaaa, se o usuário disse"},
-                 "mes": _MES}),
-    _ferramenta("mudar_mes", "Mostra outro mês no app (para ver ou mexer nele).",
-                {"mes": {"type": "string", "description": "mm/aaaa"}}, ["mes"]),
-    _ferramenta("copiar_contas_fixas", "Abre a janela do app que copia as contas fixas "
-                "(aluguel, luz...) de um mês para outro e lança parcelas futuras."),
-    _ferramenta("criar_caixinha", "Cria uma caixinha (objetivo com nome, ex.: Viagem), "
-                "com meta e primeiro valor guardado opcionais.",
-                {"nome": {"type": "string"},
-                 "meta": {"type": "number", "description": "meta em reais; omita se não houver"},
-                 "guardar": {"type": "number", "description":
-                             "valor para já guardar nela; omita se o usuário não disse"}},
-                ["nome"]),
-    _ferramenta("caixinha", "Guarda dinheiro numa caixinha ou retira dela. Não use lancar "
-                "para caixinha.",
-                {"acao": {"type": "string", "enum": ["guardar", "retirar"]},
-                 "nome": {"type": "string", "description": "nome da caixinha"},
-                 "valor": {"type": "number"}}, ["acao", "nome", "valor"]),
-    _ferramenta("meta_caixinha", "Muda a meta de uma caixinha; meta 0 tira a meta.",
-                {"nome": {"type": "string"}, "meta": {"type": "number"}}, ["nome", "meta"]),
-    _ferramenta("renomear_caixinha", "Troca o nome de uma caixinha.",
-                {"nome": {"type": "string"}, "novo_nome": {"type": "string"}},
-                ["nome", "novo_nome"]),
-    _ferramenta("excluir_caixinha", "Exclui uma caixinha vazia (o app pede confirmação).",
-                {"nome": {"type": "string"}}, ["nome"]),
-]
-# pedidos que não trazem valor: só são oferecidos se o texto pedir (senão o
-# modelo "responde" a uma pergunta renomeando a caixinha para o mesmo nome)
-PEDE_CRIAR = ("cri", "abre", "abrir", "abra", "nova", "novo", "faz", "faca", "fazer")
-PEDE_RENOMEAR = ("renome", "nome", "chama")
-
-
-def _chave(texto):
-    """Texto para comparar: sem acentos, minúsculas, sem espaços nas pontas."""
-    return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().casefold().strip()
-
-
-def ferramentas_para(texto, caixinhas=()):
-    """Só oferece ao modelo o que pode passar nas checagens: lançar, salário e
-    guardar pedem um valor escrito; limpar, remover e excluir pedem "apagar". Numa
-    pergunta sobram mudar_mes e copiar_contas_fixas (e criar/renomear caixinha, se
-    ela for citada), e o modelo responde com texto."""
-    if numeros_do_texto(texto) or pede_para_apagar(texto):
-        return FERRAMENTAS
-    nomes = {"mudar_mes", "copiar_contas_fixas"}
-    chave = _chave(texto)
-    if "caixinh" in chave and any(p in chave for p in PEDE_CRIAR):
-        nomes.add("criar_caixinha")
-    citou = "caixinh" in chave or any(_chave(cx["nome"]) in chave for cx in caixinhas)
-    if citou and any(p in chave for p in PEDE_RENOMEAR):
-        nomes.add("renomear_caixinha")
-    return [f for f in FERRAMENTAS if f["function"]["name"] in nomes]
-
-
-def _achar(texto, opcoes):
-    """A opção igual ao texto (sem ligar para maiúsculas/acentos); se não houver,
-    a única que o contém ("uber" -> "Uber / 99"), a única contida nele
-    ("Transporte - Ônibus" -> "Transporte") ou a mais parecida, para erro de
-    digitação ("trasporte" -> "Transporte"); senão None."""
-    chave = _chave
-    procurado = chave(texto)
-    if not procurado:
-        return None
-    iguais = [o for o in opcoes if chave(o) == procurado]
-    contem = [o for o in opcoes if procurado in chave(o)]
-    dentro = [o for o in opcoes if chave(o) in procurado]
-    for achadas in (iguais, contem, dentro):
-        if len(achadas) == 1 or (achadas is iguais and achadas):
-            return achadas[0]
-    por_chave = {chave(o): o for o in opcoes}
-    parecida = difflib.get_close_matches(procurado, list(por_chave), n=1, cutoff=0.8)
-    return por_chave[parecida[0]] if parecida else None
-
-
-def numeros_do_texto(texto):
-    """Valores que aparecem no texto: "25", "12,50", "1.200", "12.5" (ambos os
-    jeitos) e "2 mil", "2,8 mil", "3k"."""
-    valores = set()
-    for n, mil in re.findall(r"(\d+(?:[.,]\d+)*)\s*(mil\b|k\b)?", texto.lower()):
-        for convertido in (n.replace(".", "").replace(",", "."), n.replace(",", "")):
-            try:
-                valores.add(round(float(convertido) * (1000 if mil else 1), 2))
-            except ValueError:  # "1.2.3" no jeito americano
-                pass
-    return valores
-
-
-def _valor_do_modelo(args, texto_usuario, minimo=0.01):
-    """Valor que o modelo mandou, se for válido e estiver escrito pelo usuário
-    (o modelo não inventa quanto foi); senão um texto de erro."""
-    try:
-        valor = round(float(args.get("valor")), 2)
-    except (TypeError, ValueError):
-        return "Erro: valor deve ser um número."
-    if not minimo <= valor <= MAX_CENTAVOS / 100:
-        return "Erro: valor fora do permitido."
-    if texto_usuario is not None and valor not in numeros_do_texto(texto_usuario):
-        return ("Erro: o usuário não escreveu esse valor. Não salve; pergunte quanto foi "
-                "(em números).")
-    return valor
-
-
-def salario_do_assistente(args, mes_padrao, texto_usuario=None):
-    """Valida "salario": retorna (mês "AAAA-MM", valor) ou um texto de erro."""
-    if args.get("valor") in (0, "0"):
-        return "Erro: para apagar o salário use a ferramenta limpar com oque=salario."
-    valor = _valor_do_modelo(args, texto_usuario)
-    if isinstance(valor, str):
-        return valor
-    mes = mes_do_modelo(args, mes_padrao)
-    return (mes, valor) if mes else "Erro: mes deve ser mm/aaaa."
-
-
-def valor_digitado(texto):
-    """Valor escrito à mão (sem a máscara dos campos): "3.500,50", "3500,5",
-    "3500.50" e "3.500" -> float; None se não for número."""
-    texto = texto.strip().removeprefix("R$").strip()
-    if "," not in texto and re.fullmatch(r"\d+\.\d{1,2}", texto):
-        return float(texto)  # ponto seguido de 1-2 casas: decimal
-    try:
-        return float(texto.replace(".", "").replace(",", "."))
-    except ValueError:
-        return None
-
-
-def pede_para_apagar(texto):
-    """O usuário pediu para apagar algo? (limpar/remover só rodam se sim)"""
-    return any(v in _chave(texto) for v in
-               ("apag", "remov", "tir", "limp", "exclu", "delet", "zer", "desfaz"))
-
-
-def totais_por_dia(itens):
-    """{date: soma dos valores} dos gastos ou rendas (datas inválidas ficam de fora)."""
-    totais = {}
-    for item in itens:
-        try:
-            dia = datetime.strptime(item["data"].strip(), "%d/%m/%Y").date()
-        except (KeyError, ValueError):
-            continue
-        totais[dia] = totais.get(dia, 0.0) + item["valor"]
-    return totais
-
-
-def mes_do_modelo(args, mes_padrao):
-    """Mês dos argumentos -> "AAAA-MM": aceita "09/2026", "2026-09", "setembro",
-    "setembro de 2026" e "set" (sem ano: o atual); sem mês, o padrão; inválido, None."""
-    texto = _chave(args.get("mes") or "")
-    if not texto:
-        return mes_padrao
-    if m := re.fullmatch(r"(\d{4})-(\d{1,2})", texto):
-        return mes_de_data(f"01/{m[2]}/{m[1]}")
-    for i, (nome, abrev) in enumerate(zip(MESES_PT, MESES_ABREV)):
-        if texto.startswith(abrev) or _chave(nome) in texto:
-            ano = re.search(r"\d{4}", texto)
-            return f"{int(ano[0]) if ano else date.today().year:04d}-{i + 1:02d}"
-    return mes_de_data("01/" + texto)
-
-
-def achar_lancamentos(gastos, rendas, args, mes):
-    """Lançamentos do mês que batem com o pedido de "remover": [("g"|"r", índice)].
-
-    Filtra por tipo, valor, data e texto (na categoria, descrição, app, fonte);
-    pede pelo menos valor ou texto, para não achar o mês inteiro.
-    """
-    texto, valor = _chave(args.get("texto", "")), args.get("valor")
-    if not texto and valor in (None, ""):
-        return []
-    tipos = {"gasto": ["g"], "ganho": ["r"]}.get(str(args.get("tipo", "")).lower(), ["g", "r"])
-    achados = []
-    for tipo in tipos:
-        for i, item in enumerate(gastos if tipo == "g" else rendas):
-            if mes_do_gasto(item) != mes or (args.get("data") and item["data"] != args["data"]):
-                continue
-            try:
-                if valor not in (None, "") and round(float(valor), 2) != item["valor"]:
-                    continue
-            except (TypeError, ValueError):
-                return []
-            campos = " ".join(str(item.get(k, "")) for k in
-                              ("categoria", "descricao", "instituicao", "app", "fonte"))
-            if texto and texto not in _chave(campos):
-                continue
-            achados.append((tipo, i))
-    return achados
-
-
-def lancamento_do_assistente(args, texto_usuario=None):
-    """Valida os argumentos que o modelo mandou para "lancar" (não confia nele).
-
-    Com `texto_usuario`, o valor precisa estar escrito nele: o modelo não inventa
-    quanto foi. Retorna (gasto: bool, item) pronto para salvar, ou um texto de
-    erro que volta para o modelo corrigir.
-    """
-    tipo = str(args.get("tipo", "")).lower()
-    # o modelo às vezes troca o tipo ("fiz 250 no ifood" virou gasto): categoria
-    # que só existe de um lado (Delivery / Apps, Transporte...) decide
-    categoria = args.get("categoria", "")
-    e_gasto, e_ganho = _achar(categoria, CATEGORIAS_DIA), _achar(categoria, FONTES_RENDA)
-    if bool(e_gasto) != bool(e_ganho):
-        tipo = "gasto" if e_gasto else "ganho"
-    if tipo not in ("gasto", "ganho"):
-        return "Erro: tipo deve ser gasto ou ganho."
-    valor = _valor_do_modelo(args, texto_usuario)
-    if isinstance(valor, str):
-        return valor
-    try:
-        dia = datetime.strptime(args.get("data") or date.today().strftime("%d/%m/%Y"),
-                                "%d/%m/%Y")
-    except (TypeError, ValueError):
-        return "Erro: data deve ser dd/mm/aaaa."
-    gasto = tipo == "gasto"
-    opcoes = CATEGORIAS_DIA if gasto else FONTES_RENDA
-    escolha = _achar(categoria, opcoes)
-    if not escolha:
-        return "Erro: categoria deve ser uma de: " + ", ".join(opcoes)
-    subs = subopcoes(gasto, escolha)
-    sub = _achar(args.get("detalhe", ""), subs) if subs else None
-    if subs and not sub:
-        return f"Erro: para {escolha}, detalhe deve ser um de: " + ", ".join(subs)
-    cartao = _achar(args.get("pagamento", ""), CARTOES) if gasto else None
-    return gasto, novo_lancamento(gasto, valor, dia.strftime("%d/%m/%Y"), escolha, sub, cartao)
-
-
-def chamadas_de_ferramenta(msg):
-    """tool_calls da resposta; modelos como o qwen2.5-coder às vezes escrevem a
-    chamada como JSON no texto ({"name": ..., "arguments": ...}): vale também."""
-    if msg.get("tool_calls"):
-        return msg["tool_calls"]
-    texto, decoder, chamadas, i = msg.get("content") or "", json.JSONDecoder(), [], 0
-    while (i := texto.find("{", i)) != -1:  # um ou mais objetos JSON no meio do texto
-        try:
-            obj, fim = decoder.raw_decode(texto, i)
-        except ValueError:
-            i += 1
-            continue
-        if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-            chamadas.append({"function": obj})
-        i = fim
-    if chamadas:
-        msg["content"] = ""  # não mostra o JSON (nem o texto em volta) como resposta
-    return chamadas
-
-
-def chamar_ollama(corpo):
-    """POST em /api/chat (roda fora da interface); devolve a mensagem ou a exceção."""
-    pedido = urllib.request.Request(OLLAMA_URL + "/api/chat", data=json.dumps(corpo).encode(),
-                                    headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(pedido, timeout=300) as resposta:
-            return json.load(resposta)["message"]
-    except (OSError, ValueError, KeyError) as erro:  # sem Ollama, modelo ausente, timeout
-        return erro
 
 
 def _cor_progresso(pct):
@@ -1164,7 +427,15 @@ class CalculadorApp:
         self.root.geometry("1080x980")
         self.root.minsize(940, 800)
 
-        self.orcamentos, self.gastos, self.rendas, self.caixinhas = carregar_dados()
+        copias = []  # preenchida se o arquivo de dados for guardado como corrompido
+        self.orcamentos, self.gastos, self.rendas, self.caixinhas = carregar_dados(copias.append)
+        self._salvo = copy.deepcopy(self._dados())  # último estado gravado; ver _salvar
+        padrao = self.root.report_callback_exception
+
+        def relatar(tipo, erro, rastro):  # ErroAoSalvar já foi avisado na tela
+            if not isinstance(erro, ErroAoSalvar):
+                padrao(tipo, erro, rastro)
+        self.root.report_callback_exception = relatar
         self._caixinhas_nos_cards = None  # (nome, meta) desenhados; ver _atualizar_caixinhas
         self.mes_atual = mes_atual_chave()
         self.dia = date.today()  # dia exibido na aba Diário
@@ -1178,6 +449,11 @@ class CalculadorApp:
         self._montar_widgets()
         self._estilizar_treeview()
         self._atualizar_tudo()
+        if copias:  # sem aviso, parece que os dados sumiram
+            self.root.after(500, lambda: self._toast(
+                "Arquivo de dados com problema: guardado como "
+                f"{os.path.basename(copias[0])}. Veja o README para recuperar.",
+                "erro", duracao=15000))
 
     # ------------------------------------------------------------- fontes ---
     def _preparar_fontes(self):
@@ -1241,7 +517,7 @@ class CalculadorApp:
             self.tree.tag_configure("impar", background=card, foreground=texto)
 
     # -------------------------------------------------------------- toasts ---
-    def _toast(self, mensagem, tipo="info"):
+    def _toast(self, mensagem, tipo="info", duracao=2800):
         """Mostra uma mensagem discreta e temporária no rodapé da janela."""
         cores = {"sucesso": COR_POS, "erro": COR_NEG, "info": ACCENT}
         if self._toast_lbl is not None and self._toast_lbl.winfo_exists():
@@ -1251,7 +527,7 @@ class CalculadorApp:
                            corner_radius=10, font=self.ft_bold, height=40)
         lbl.place(relx=0.5, rely=0.965, anchor="s")
         self._toast_lbl = lbl
-        self.root.after(2800, lambda: lbl.winfo_exists() and lbl.destroy())
+        self.root.after(duracao, lambda: lbl.winfo_exists() and lbl.destroy())
 
     def _confirmar(self, titulo, mensagem):
         """Diálogo modal de confirmação (Remover/Cancelar) no estilo do app."""
@@ -2904,7 +2180,8 @@ class CalculadorApp:
     # --------------------------------------------------------------- ações ---
     def _parse_valor(self, texto):
         try:
-            return float(texto.strip().replace(".", "").replace(",", "."))
+            valor = float(texto.strip().replace(".", "").replace(",", "."))
+            return valor if math.isfinite(valor) else None
         except ValueError:
             return None
 
@@ -2966,6 +2243,12 @@ class CalculadorApp:
         categoria = self.cat_var.get()
         cartao = self.cartao_var.get()
         data_texto = self.data_var.get().strip()
+        if data_texto:
+            try:
+                datetime.strptime(data_texto, "%d/%m/%Y")
+            except ValueError:
+                self._toast("Informe uma data válida no formato dd/mm/aaaa.", "erro")
+                return
 
         if valor is None or valor <= 0:
             self._toast("Informe um valor maior que zero.", "erro")
@@ -2988,6 +2271,9 @@ class CalculadorApp:
         editando = self._editando is not None
         if categoria in CATEGORIAS_PARCELADAS:
             anterior = self.gastos[self._editando] if editando else {}
+            if anterior.get("parcela", 1) > n_parcelas:
+                self._toast("O total de parcelas não pode ser menor que a parcela atual.", "erro")
+                return
             novo["parcelas"] = n_parcelas
             novo["parcela"] = anterior.get("parcela", 1)
             novo["compra"] = anterior.get("compra") or uuid.uuid4().hex[:12]
@@ -3375,8 +2661,24 @@ class CalculadorApp:
         return copiadas
 
     # ---------------------------------------------------------- atualização ---
+    def _dados(self):
+        return self.orcamentos, self.gastos, self.rendas, self.caixinhas
+
     def _salvar(self):
-        salvar_dados(self.orcamentos, self.gastos, self.rendas, self.caixinhas)
+        """Grava os dados. Se falhar, volta ao último estado gravado, avisa e
+        interrompe a ação: a tela nunca mostra o que não está no arquivo."""
+        try:
+            salvar_dados(*self._dados())
+        except (OSError, ValueError, TypeError) as erro:
+            self.orcamentos, self.gastos, self.rendas, self.caixinhas = \
+                copy.deepcopy(self._salvo)
+            self.orc_var.set(formatar_numero(self.orcamento_do_mes()))
+            self._preencher_renda()
+            self._atualizar_tudo()
+            mensagem = f"Não foi possível salvar ({erro}). A alteração foi desfeita."
+            self._toast(mensagem, "erro", duracao=8000)
+            raise ErroAoSalvar(mensagem) from erro
+        self._salvo = copy.deepcopy(self._dados())
 
     def _atualizar_tudo(self):
         self._atualizar_lista()
@@ -3784,3 +3086,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
