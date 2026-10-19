@@ -2672,6 +2672,8 @@ class CalculadorApp:
         except (OSError, ValueError, TypeError) as erro:
             self.orcamentos, self.gastos, self.rendas, self.caixinhas = \
                 copy.deepcopy(self._salvo)
+            self.orc_var.set(formatar_numero(self.orcamento_do_mes()))
+            self._preencher_renda()
             self._atualizar_tudo()
             mensagem = f"Não foi possível salvar ({erro}). A alteração foi desfeita."
             self._toast(mensagem, "erro", duracao=8000)
@@ -3084,3 +3086,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

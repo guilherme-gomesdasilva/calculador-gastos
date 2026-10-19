@@ -34,16 +34,12 @@ def label_mes_curto(chave):
 
 
 def mes_de_data(texto):
-    """Extrai a chave de mês 'AAAA-MM' de uma data 'dd/mm/aaaa'."""
-    partes = (texto or "").strip().split("/")
-    if len(partes) == 3:
-        try:
-            _, mes, ano = int(partes[0]), int(partes[1]), int(partes[2])
-            if 1 <= mes <= 12:
-                return f"{ano:04d}-{mes:02d}"
-        except ValueError:
-            pass
-    return None
+    """Chave 'AAAA-MM' de uma data válida; datas antigas inválidas ficam de fora."""
+    try:
+        dia = datetime.strptime((texto or "").strip(), "%d/%m/%Y")
+    except ValueError:
+        return None
+    return f"{dia.year:04d}-{dia.month:02d}"
 
 
 def mes_do_gasto(gasto):
@@ -305,5 +301,6 @@ def totais_por_dia(itens):
             continue
         totais[dia] = totais.get(dia, 0.0) + item["valor"]
     return totais
+
 
 

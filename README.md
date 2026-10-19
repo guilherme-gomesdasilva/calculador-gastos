@@ -163,7 +163,8 @@ conferência visual das abas, dos gráficos e dos diálogos.
 São aceitos o formato atual e os formatos antigos (lista de gastos ou orçamento
 único). Lançamentos precisam ter data em texto, valor numérico finito e não
 negativo e categoria/fonte em texto. Datas inválidas salvas por versões
-anteriores (ex.: `31/02/2026`) são mantidas e ignoradas nas contas; datas
+anteriores (ex.: `31/02/2026`) são mantidas no arquivo e ficam fora dos
+totais e das listagens por mês e dia até serem corrigidas no JSON; datas
 novas são validadas ao lançar. Caixinhas, orçamentos e parcelas também
 são validados; campos extras dos lançamentos são mantidos.
 
@@ -178,7 +179,8 @@ Se não for possível ler o arquivo por falta de permissão ou preservar a cópi
 o erro é propagado, impedindo que o aplicativo inicie com dados vazios sobre um
 arquivo sem proteção. Ao salvar, os dados são validados antes da gravação, e a
 troca do arquivo ocorre somente depois da escrita e sincronização do temporário.
-Se a gravação falhar, a alteração é desfeita na tela e um aviso é mostrado.
+Se a gravação falhar, a alteração é desfeita na tela, os campos de salário e
+renda voltam aos valores salvos e um aviso é mostrado.
 As cópias de recuperação e o temporário ficam fora do Git.
 
 ---
@@ -260,3 +262,4 @@ calculador-gastos/
 
 Distribuído sob a licença **MIT**. Veja o arquivo [LICENSE](LICENSE) para mais
 detalhes.
+
