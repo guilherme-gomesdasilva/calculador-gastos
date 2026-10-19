@@ -32,9 +32,11 @@ def _movimentos(itens, campo):
         if not isinstance(item.get(campo), str) or not item[campo].strip():
             raise ValueError(f"Lançamento sem {campo}.")
         _numero(item.get("valor"))
+        # Só o tipo é exigido: versões anteriores aceitavam qualquer texto na data
+        # (ex.: "31/02/2026"). Recusar aqui esconderia o arquivo inteiro; o app já
+        # ignora datas inválidas nas contas e valida as datas novas na interface.
         if not isinstance(item.get("data"), str):
             raise ValueError("Data deve ser texto.")
-        datetime.strptime(item["data"].strip(), "%d/%m/%Y")
         for chave in ("descricao", "cartao", "instituicao", "app", "caixinha", "compra"):
             if chave in item and not isinstance(item[chave], str):
                 raise ValueError(f"{chave} deve ser texto.")
@@ -89,8 +91,11 @@ def _validar(dados):
     return orcamentos, gastos, rendas, caixinhas
 
 
-def carregar_dados(caminho):
+def carregar_dados(caminho, ao_preservar=None):
     """Lê formatos atuais/antigos. Preserva arquivo inválido antes de iniciar vazio.
+
+    `ao_preservar(copia)` é chamado com o caminho da cópia quando o arquivo é
+    guardado como corrompido, para a interface poder avisar o usuário.
 
     Erros de acesso e falhas ao preservar o original são propagados: retornar
     vazio nesses casos poderia permitir sobrescrever dados ainda não protegidos.
@@ -107,6 +112,8 @@ def carregar_dados(caminho):
     except (ValueError, TypeError, OverflowError):
         copia = f"{caminho}.corrompido-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
         os.replace(caminho, copia)
+        if ao_preservar:
+            ao_preservar(copia)
         return {}, [], [], []
 
 

@@ -56,7 +56,7 @@ class ArmazenamentoTests(unittest.TestCase):
         ruins += [{"gastos": [{**self.gasto, "valor": valor}]} for valor in
                   (None, "90", True, -1, float("nan"), float("inf"), 10**400)]
         ruins += [{"gastos": [{**self.gasto, **campos}]} for campos in
-                  ({"data": "31/02/2026"}, {"data": 1}, {"categoria": []},
+                  ({"data": 1}, {"categoria": []},
                    {"descricao": []}, {"compra": "abc"},
                    {"compra": "abc", "parcela": 2, "parcelas": 1},
                    {"compra": "abc", "parcela": True, "parcelas": 12})]
@@ -70,6 +70,24 @@ class ArmazenamentoTests(unittest.TestCase):
                 self.assertEqual(len(novas), 1)
                 self.assertEqual(novas.pop().read_bytes(), original)
                 self.assertFalse(self.caminho.exists())
+
+    def test_data_invalida_de_versao_anterior_nao_esconde_o_arquivo(self):
+        # versões anteriores aceitavam qualquer texto na data
+        ruins = [{**self.gasto, "data": data} for data in ("31/02/2026", "10/09", " ")]
+        dados = {"orcamentos": {}, "gastos": [self.gasto, *ruins], "rendas": [], "caixinhas": []}
+        self.gravar(dados)
+        carregados = carregar_dados(self.caminho)
+        self.assertEqual(carregados[1], dados["gastos"])
+        self.assertEqual(list(self.caminho.parent.glob("*.corrompido-*")), [])
+        salvar_dados(self.caminho, *carregados)  # continua salvável
+        self.assertEqual(carregar_dados(self.caminho), carregados)
+
+    def test_avisa_quando_preserva_arquivo(self):
+        self.gravar({"gastos": "inválido"})
+        copias = []
+        carregar_dados(self.caminho, copias.append)
+        self.assertEqual(len(copias), 1)
+        self.assertTrue(Path(copias[0]).exists())
 
     def test_json_truncado_e_encoding_invalido(self):
         for conteudo in (b'{"gastos": [', b'\xff\xfe'):

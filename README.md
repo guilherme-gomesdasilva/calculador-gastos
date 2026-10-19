@@ -161,15 +161,18 @@ conferência visual das abas, dos gráficos e dos diálogos.
 ### Proteção dos arquivos de dados
 
 São aceitos o formato atual e os formatos antigos (lista de gastos ou orçamento
-único). Lançamentos precisam ter data válida, valor numérico finito e não
-negativo e categoria/fonte em texto. Caixinhas, orçamentos e parcelas também
+único). Lançamentos precisam ter data em texto, valor numérico finito e não
+negativo e categoria/fonte em texto. Datas inválidas salvas por versões
+anteriores (ex.: `31/02/2026`) são mantidas e ignoradas nas contas; datas
+novas são validadas ao lançar. Caixinhas, orçamentos e parcelas também
 são validados; campos extras dos lançamentos são mantidos.
 
 Se o JSON estiver corrompido ou sua estrutura for inválida, o arquivo inteiro é
 preservado como `gastos.json.corrompido-<data>-<identificador>` na mesma pasta,
-e o aplicativo inicia com dados vazios. Nenhum lançamento é filtrado ou apagado
-individualmente. Para recuperar os dados, guarde essa cópia, corrija o problema
-e restaure o conteúdo para `gastos.json` com o aplicativo fechado.
+e o aplicativo inicia com dados vazios, mostrando um aviso com o nome da cópia.
+Nenhum lançamento é filtrado ou apagado individualmente. Para recuperar os
+dados, guarde essa cópia, corrija o problema e restaure o conteúdo para
+`gastos.json` com o aplicativo fechado.
 
 Se não for possível ler o arquivo por falta de permissão ou preservar a cópia,
 o erro é propagado, impedindo que o aplicativo inicie com dados vazios sobre um

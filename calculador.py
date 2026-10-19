@@ -185,9 +185,9 @@ def _cor(tupla):
 # =========================================================== dados / util ===
 
 
-def carregar_dados():
+def carregar_dados(ao_preservar=None):
     """Lê os dados no caminho usado pela aplicação."""
-    return _ler_dados(DATA_FILE)
+    return _ler_dados(DATA_FILE, ao_preservar)
 
 
 def salvar_dados(orcamentos, gastos, rendas, caixinhas):
@@ -422,7 +422,8 @@ class CalculadorApp:
         self.root.geometry("1080x980")
         self.root.minsize(940, 800)
 
-        self.orcamentos, self.gastos, self.rendas, self.caixinhas = carregar_dados()
+        copias = []  # preenchida se o arquivo de dados for guardado como corrompido
+        self.orcamentos, self.gastos, self.rendas, self.caixinhas = carregar_dados(copias.append)
         self._caixinhas_nos_cards = None  # (nome, meta) desenhados; ver _atualizar_caixinhas
         self.mes_atual = mes_atual_chave()
         self.dia = date.today()  # dia exibido na aba Diário
@@ -436,6 +437,11 @@ class CalculadorApp:
         self._montar_widgets()
         self._estilizar_treeview()
         self._atualizar_tudo()
+        if copias:  # sem aviso, parece que os dados sumiram
+            self.root.after(500, lambda: self._toast(
+                "Arquivo de dados com problema: guardado como "
+                f"{os.path.basename(copias[0])}. Veja o README para recuperar.",
+                "erro", duracao=15000))
 
     # ------------------------------------------------------------- fontes ---
     def _preparar_fontes(self):
@@ -499,7 +505,7 @@ class CalculadorApp:
             self.tree.tag_configure("impar", background=card, foreground=texto)
 
     # -------------------------------------------------------------- toasts ---
-    def _toast(self, mensagem, tipo="info"):
+    def _toast(self, mensagem, tipo="info", duracao=2800):
         """Mostra uma mensagem discreta e temporária no rodapé da janela."""
         cores = {"sucesso": COR_POS, "erro": COR_NEG, "info": ACCENT}
         if self._toast_lbl is not None and self._toast_lbl.winfo_exists():
@@ -509,7 +515,7 @@ class CalculadorApp:
                            corner_radius=10, font=self.ft_bold, height=40)
         lbl.place(relx=0.5, rely=0.965, anchor="s")
         self._toast_lbl = lbl
-        self.root.after(2800, lambda: lbl.winfo_exists() and lbl.destroy())
+        self.root.after(duracao, lambda: lbl.winfo_exists() and lbl.destroy())
 
     def _confirmar(self, titulo, mensagem):
         """Diálogo modal de confirmação (Remover/Cancelar) no estilo do app."""
