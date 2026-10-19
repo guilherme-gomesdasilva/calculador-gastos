@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import assistente
-from calculador import CalculadorApp
+from calculador import CalculadorApp, ErroAoSalvar
 from dominio import valor_digitado
 
 
@@ -72,6 +72,21 @@ class IntegracaoTests(unittest.TestCase):
         app.adicionar_gasto()
         app._salvar.assert_not_called()
         self.assertEqual(app.gastos, [original])
+
+    def test_falha_ao_salvar_desfaz_a_alteracao_e_avisa(self):
+        app = CalculadorApp.__new__(CalculadorApp)
+        gasto = {"data": "05/09/2026", "categoria": "Luz", "cartao": "Pix", "valor": 90.0}
+        app.orcamentos, app.gastos, app.rendas, app.caixinhas = {}, [gasto], [], []
+        app._salvo = ({}, [dict(gasto)], [], [])
+        app._atualizar_tudo = Mock()
+        app._toast = Mock()
+        app.gastos.append({**gasto, "valor": 10.0})
+        with patch("calculador.salvar_dados", side_effect=PermissionError("sem permissão")):
+            with self.assertRaises(ErroAoSalvar):
+                app._salvar()
+        self.assertEqual(app.gastos, [gasto])
+        app._atualizar_tudo.assert_called_once()
+        self.assertIn("desfeita", app._toast.call_args.args[0])
 
 
 if __name__ == "__main__":

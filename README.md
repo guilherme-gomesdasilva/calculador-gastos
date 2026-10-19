@@ -178,6 +178,7 @@ Se não for possível ler o arquivo por falta de permissão ou preservar a cópi
 o erro é propagado, impedindo que o aplicativo inicie com dados vazios sobre um
 arquivo sem proteção. Ao salvar, os dados são validados antes da gravação, e a
 troca do arquivo ocorre somente depois da escrita e sincronização do temporário.
+Se a gravação falhar, a alteração é desfeita na tela e um aviso é mostrado.
 As cópias de recuperação e o temporário ficam fora do Git.
 
 ---

@@ -20,6 +20,7 @@ Requer: customtkinter, matplotlib. Rode com o interpretador do .venv:
 
 import bisect
 import calendar
+import copy
 import json
 import math
 import os
@@ -193,6 +194,10 @@ def carregar_dados(ao_preservar=None):
 def salvar_dados(orcamentos, gastos, rendas, caixinhas):
     """Salva no caminho usado pela aplicação, com troca atômica."""
     return _gravar_dados(DATA_FILE, orcamentos, gastos, rendas, caixinhas)
+
+
+class ErroAoSalvar(Exception):
+    """A gravação falhou e a alteração foi desfeita; interrompe a ação em curso."""
 
 
 def arquivo_logo(instituicao, extensao=".png"):
@@ -424,6 +429,13 @@ class CalculadorApp:
 
         copias = []  # preenchida se o arquivo de dados for guardado como corrompido
         self.orcamentos, self.gastos, self.rendas, self.caixinhas = carregar_dados(copias.append)
+        self._salvo = copy.deepcopy(self._dados())  # último estado gravado; ver _salvar
+        padrao = self.root.report_callback_exception
+
+        def relatar(tipo, erro, rastro):  # ErroAoSalvar já foi avisado na tela
+            if not isinstance(erro, ErroAoSalvar):
+                padrao(tipo, erro, rastro)
+        self.root.report_callback_exception = relatar
         self._caixinhas_nos_cards = None  # (nome, meta) desenhados; ver _atualizar_caixinhas
         self.mes_atual = mes_atual_chave()
         self.dia = date.today()  # dia exibido na aba Diário
@@ -2649,8 +2661,22 @@ class CalculadorApp:
         return copiadas
 
     # ---------------------------------------------------------- atualização ---
+    def _dados(self):
+        return self.orcamentos, self.gastos, self.rendas, self.caixinhas
+
     def _salvar(self):
-        salvar_dados(self.orcamentos, self.gastos, self.rendas, self.caixinhas)
+        """Grava os dados. Se falhar, volta ao último estado gravado, avisa e
+        interrompe a ação: a tela nunca mostra o que não está no arquivo."""
+        try:
+            salvar_dados(*self._dados())
+        except (OSError, ValueError, TypeError) as erro:
+            self.orcamentos, self.gastos, self.rendas, self.caixinhas = \
+                copy.deepcopy(self._salvo)
+            self._atualizar_tudo()
+            mensagem = f"Não foi possível salvar ({erro}). A alteração foi desfeita."
+            self._toast(mensagem, "erro", duracao=8000)
+            raise ErroAoSalvar(mensagem) from erro
+        self._salvo = copy.deepcopy(self._dados())
 
     def _atualizar_tudo(self):
         self._atualizar_lista()
